@@ -32,7 +32,7 @@ Legt man die Teile wieder zusammen, kommt das Original zurück, Pixel für Pixel
 ## Installation
 
 ```bash
-git clone https://github.com/kkwonderlands/kk-pixelcut
+git clone https://github.com/CalyieX/pixelcut
 cd kk-pixelcut
 pip install -r requirements.txt     # numpy, opencv-python-headless, Pillow
 python pixelcut.py -h
