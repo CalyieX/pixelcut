@@ -1,0 +1,44 @@
+name: release
+on:
+  push:
+    tags: ["v*"]
+jobs:
+  tests:
+    uses: ./.github/workflows/ci.yml
+  build:
+    needs: tests
+    strategy:
+      matrix:
+        include:
+          - { os: windows-latest, name: windows-x64 }
+          - { os: ubuntu-latest, name: linux-x64 }
+          - { os: ubuntu-24.04-arm, name: linux-arm64 }
+          - { os: macos-latest, name: macos-arm64 }
+          - { os: macos-13, name: macos-intel }
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with: { python-version: "3.12" }
+      - run: python -m pip install . pyinstaller
+      - run: pyinstaller --onefile --name pixelcut --collect-all skimage --collect-all vtracer pixelcut.py
+      - name: smoke test of the built program
+        shell: bash
+        run: |
+          ./dist/pixelcut* --help
+          ./dist/pixelcut* split examples/photo_cat.png o --opaque --gap 0 --edge 0
+          ./dist/pixelcut* join o back.png
+          ./dist/pixelcut* compare examples/photo_cat.png back.png | grep "max |diff| 0"
+      - run: mv dist/pixelcut* dist/pixelcut-${{ matrix.name }}$(test -f dist/pixelcut.exe && echo .exe)
+        shell: bash
+      - uses: actions/upload-artifact@v4
+        with: { name: "pixelcut-${{ matrix.name }}", path: "dist/pixelcut-*" }
+  publish:
+    needs: build
+    runs-on: ubuntu-latest
+    permissions: { contents: write }
+    steps:
+      - uses: actions/download-artifact@v4
+        with: { path: dist, merge-multiple: true }
+      - uses: softprops/action-gh-release@v2
+        with: { files: "dist/*", generate_release_notes: true }

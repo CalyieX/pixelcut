@@ -1,0 +1,21 @@
+[build-system]
+requires = ["setuptools>=64"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "pixelcut"
+version = "1.0.0"
+description = "K&K pixelcut - cut a picture into parts without changing a single pixel"
+readme = "README.md"
+license = { text = "MIT" }
+requires-python = ">=3.9"
+dependencies = ["numpy>=1.23", "opencv-python-headless>=4.7", "Pillow>=9.5", "scikit-image>=0.20", "vtracer>=0.6"]
+
+[project.optional-dependencies]
+test = ["pytest"]
+
+[project.scripts]
+pixelcut = "pixelcut:main"
+
+[tool.setuptools]
+py-modules = ["pixelcut"]
