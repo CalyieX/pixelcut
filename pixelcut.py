@@ -57,7 +57,7 @@ def load_rgb(path):
         arr = np.array(im).astype(np.float64)
         top = 65535.0 if im.mode.startswith("I;16") else max(arr.max(), 1.0)
         return np.dstack([np.clip(arr / top * 255 + 0.5, 0, 255).astype(np.uint8)] * 3)
-    if im.mode in ("RGBA", "LA", "PA") or (im.mode == "P" and "transparency" in im.info):
+    if im.mode in ("RGBA", "LA", "PA") or "transparency" in im.info:                      # includes L/RGB with a PNG colour key
         print("note: %s has transparency - composited over white" % path, file=sys.stderr)
         im = im.convert("RGBA")
         bg = Image.new("RGBA", im.size, (255, 255, 255, 255))
@@ -347,7 +347,7 @@ def cmd_join(a):
             size = tuple(m["size"])
             assert len(size) == 2 and all(isinstance(v, int) and v > 0 for v in size) and n > 0
             names = m.get("files") or ["part_%d.png" % k for k in range(n)]
-            assert len(names) == n and all(isinstance(x, str) and PART_NAME.fullmatch(x) for x in names)
+            assert len(names) == n == len(set(names)) and all(isinstance(x, str) and PART_NAME.fullmatch(x) for x in names)
         except (ValueError, KeyError, TypeError, AssertionError, AttributeError):
             sys.exit("parts.json is damaged (needs 'size' [w,h], 'parts' and matching 'files')")
         files = [Path(a.parts) / x for x in names]

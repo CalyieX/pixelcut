@@ -351,3 +351,20 @@ def test_zigzag_does_not_disturb_close_lines(tmp_path, angles):
     far = np.min(ray, axis=0) > depth + 3
     assert far.sum() > 1000
     assert (got[far] != want[far]).sum() == 0
+
+
+def test_colour_key_transparency_is_composited_over_white(tmp_path):
+    im = Image.new("RGB", (4, 4), (0, 0, 0))
+    im.save(tmp_path / "k.png", transparency=(0, 0, 0))
+    r = cli("alpha", tmp_path / "k.png", tmp_path / "k_out.png")
+    assert "transparency" in r.stderr
+    assert rgba_of(tmp_path / "k_out.png")[:, :, 3].max() == 0     # black was the transparent key, white remains -> nothing left
+
+
+def test_join_refuses_duplicate_part_names(tmp_path):
+    out = tmp_path / "d"
+    cli("split", EX / "photo_cat.png", out, "--opaque", "--angles", "0,90,180,270", "--gap", "0", "--edge", "0")
+    m = json.loads((out / "parts.json").read_text())
+    m["files"] = ["part_0.png"] * 4
+    (out / "parts.json").write_text(json.dumps(m))
+    assert "damaged" in fails("join", out, tmp_path / "j.png")
