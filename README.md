@@ -33,6 +33,12 @@ Legt man die Teile wieder zusammen, kommt das Original zurück, Pixel für Pixel
 
 ---
 
+## Download (ohne Python)
+
+Fertige Programme für Windows, Linux (x64 und ARM) und Mac (Apple Silicon und Intel) gibt es unter [Releases](https://github.com/CalyieX/pixelcut/releases/latest). Herunterladen, starten, fertig. Jedes Programm wurde vor dem Hochladen mit einem Rundlauftest geprüft.
+
+---
+
 ## Installation
 
 ```bash
