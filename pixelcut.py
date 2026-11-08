@@ -30,6 +30,7 @@ from PIL import Image
 
 
 PART_NAME = re.compile(r"part_\d+\.png")
+JOURNAL = ".journal.json"
 
 
 # ----------------------------------------------------------------------------- helpers
@@ -178,7 +179,7 @@ def cmd_split(a):
     rgb = load_rgb(a.input)
     h, w = rgb.shape[:2]
     rgba = np.dstack([rgb, np.full(rgb.shape[:2], 255, np.uint8)]) if a.opaque else color_to_alpha(rgb)
-    if rgba[:, :, 3].max() <= 8:                              # same threshold the parts and polygons use: nothing visible would be cut
+    if rgba[:, :, 3].max() == 0:                              # no pixel has any alpha: there is literally nothing to cut
         sys.exit("the image is completely white - nothing to cut (use --opaque to cut it anyway)")
     if a.centre == "auto":                                    # centroid of everything that is not white
         m = (rgb.min(2) < 250).astype(np.uint8)
@@ -227,9 +228,18 @@ def cmd_split(a):
     out.mkdir(parents=True, exist_ok=True)
     leftover = out / ".pixelcut_old"                          # an earlier run was interrupted while swapping: its old set is the only full copy
     if leftover.is_dir():
-        strange = [f.name for f in leftover.iterdir() if not (PART_NAME.fullmatch(f.name) or f.name == "parts.json")]
+        strange = [f.name for f in leftover.iterdir() if not (PART_NAME.fullmatch(f.name) or f.name in ("parts.json", JOURNAL))]
         if strange:
             sys.exit("%s holds files pixelcut did not put there (%s) - check and remove it first" % (leftover, ", ".join(strange)))
+        journal = leftover / JOURNAL
+        if journal.is_file():                                 # files the interrupted run had already put in place: take them out again
+            try:
+                for name in json.loads(journal.read_text()):
+                    if isinstance(name, str) and (PART_NAME.fullmatch(name) or name == "parts.json") and (out / name).is_file():
+                        (out / name).unlink()
+            except ValueError:
+                pass
+            journal.unlink()
         for f in leftover.iterdir():                          # only pixelcut's own names are ever restored
             os.replace(f, out / f.name)
         shutil.rmtree(leftover)
@@ -240,8 +250,10 @@ def cmd_split(a):
         try:
             listed = json.loads(old_manifest.read_text()).get("files", [])
             ours = {n for n in listed if isinstance(n, str) and PART_NAME.fullmatch(n)}
-        except Exception:                                    # damaged manifest: treat the folder as foreign
-            ours = set()
+            if not (isinstance(listed, list) and isinstance(json.loads(old_manifest.read_text()).get("parts"), list)):
+                raise ValueError("no pixelcut manifest")
+        except Exception:                                    # a parts.json that is not ours is never touched
+            sys.exit("%s exists but is not a pixelcut manifest - use an empty folder" % old_manifest)
     clash = [("part_%d.png" % k) for k in range(len(angles)) if (out / ("part_%d.png" % k)).exists() and ("part_%d.png" % k) not in ours]
     if clash:
         sys.exit("%s already exists in %s and was not written by pixelcut - use an empty folder" % (", ".join(clash), out))
@@ -270,6 +282,7 @@ def cmd_split(a):
     (staging / "parts.json").write_text(json.dumps({"size": [w, h], "centre": list(centre), "files": files, "parts": info}, indent=1))
     backup = out / ".pixelcut_old"                            # old files are moved aside, not deleted - an abort rolls back
     backup.mkdir()                                            # (a leftover one was restored above, so this is always new)
+    (backup / JOURNAL).write_text(json.dumps(files + ["parts.json"]))     # tells a later recovery which files this run may have installed
     moved, installed = [], []
     try:
         for name in sorted(ours | {"parts.json"}):

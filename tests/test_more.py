@@ -411,7 +411,9 @@ def test_bright_but_not_white_image_can_be_cut_opaque(tmp_path):
     Image.new("RGB", (40, 30), (254, 254, 254)).save(tmp_path / "w.png")
     cli("split", tmp_path / "w.png", tmp_path / "o", "--opaque", "--angles", "0,180", "--gap", "0", "--edge", "0")
     assert (tmp_path / "o" / "parts.json").exists()
-    assert "completely white" in fails("split", tmp_path / "w.png", tmp_path / "o2")
+    cli("split", tmp_path / "w.png", tmp_path / "o3", "--angles", "0,180", "--gap", "0", "--edge", "0")   # faint alpha is still alpha
+    Image.new("RGB", (40, 30), (255, 255, 255)).save(tmp_path / "pure.png")
+    assert "completely white" in fails("split", tmp_path / "pure.png", tmp_path / "o2")
 
 
 def test_upscale_no_ai_works_offline(tmp_path):
@@ -461,3 +463,29 @@ def test_only_inside_on_a_blank_image(tmp_path):
     Image.new("RGB", (40, 30), (255, 255, 255)).save(tmp_path / "w.png")
     cli("split", tmp_path / "w.png", tmp_path / "o", "--opaque", "--only-inside", "--angles", "0,180", "--gap", "0", "--edge", "0")
     assert (tmp_path / "o" / "parts.json").exists()
+
+
+def test_foreign_manifest_is_never_touched(tmp_path):
+    out = tmp_path / "m"
+    out.mkdir()
+    (out / "parts.json").write_text("not json at all")
+    assert "not a pixelcut manifest" in fails("split", EX / "photo_cat.png", out, "--opaque", "--angles", "0,180")
+    assert (out / "parts.json").read_text() == "not json at all"
+    (out / "parts.json").write_text('{"mine": 1}')
+    assert "not a pixelcut manifest" in fails("split", EX / "photo_cat.png", out, "--opaque", "--angles", "0,180")
+    assert (out / "parts.json").read_text() == '{"mine": 1}'
+
+
+def test_crash_while_growing_the_set_restores_the_old_one(tmp_path):
+    out = tmp_path / "g"
+    cli("split", EX / "photo_cat.png", out, "--opaque", "--angles", "0,180", "--gap", "0", "--edge", "0")
+    before = {f.name: f.read_bytes() for f in out.iterdir()}
+    old = out / ".pixelcut_old"                                    # crash while swapping 2 -> 4 parts: part_2 already installed
+    old.mkdir()
+    for n in ("part_0.png", "part_1.png", "parts.json"):
+        (out / n).replace(old / n)
+    (old / ".journal.json").write_text(json.dumps(["part_0.png", "part_1.png", "part_2.png", "part_3.png", "parts.json"]))
+    (out / "part_0.png").write_bytes(b"new")
+    (out / "part_2.png").write_bytes(b"new")
+    cli("split", EX / "photo_cat.png", out, "--opaque", "--angles", "0,90,180,270", "--gap", "0", "--edge", "0")
+    assert len(list(out.glob("part_*.png"))) == 4                  # the retry worked: part_2 was not mistaken for a foreign file
