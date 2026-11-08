@@ -1,6 +1,8 @@
 # K&K pixelcut
 
-![license](https://img.shields.io/badge/license-MIT-blue) ![python](https://img.shields.io/badge/python-3.9%2B-informational) ![lossless](https://img.shields.io/badge/pixels-unchanged-brightgreen) ![tests](https://img.shields.io/badge/tests-3%20passing-brightgreen)
+![license](https://img.shields.io/badge/license-MIT-blue) ![python](https://img.shields.io/badge/python-3.9%2B-informational) ![lossless](https://img.shields.io/badge/pixels-unchanged-brightgreen) ![tests](https://github.com/CalyieX/pixelcut/actions/workflows/ci.yml/badge.svg)
+
+[![Unterstützen auf Ko-fi](https://ko-fi.com/img/githubbutton_sm.svg)](https://ko-fi.com/kkwonderland)
 
 **English in short:** a small command-line tool that cuts an image into wedge-shaped parts (free angles, straight or **zig-zag** edges) **without altering a single pixel**, turns a white background into real transparency (exact colour-to-alpha), lifts a word or element out and re-places it, and writes **hit-area polygons** for touch menus. Parts put back together over white give the original back (max deviation <= 1/255, measured with `--verify` and `compare`). It does *not* generate or redraw images and does not upscale without inventing pixels. Works on drawings and photos. Details below (German).
 
@@ -192,3 +194,7 @@ Prüft, dass die Teile über Weiß das Original ergeben (Zeichnung und Foto, Abw
 MIT. Das Foto stammt aus `skimage.data` (CC0). Die Demo-Grafik ist selbst erzeugt (`make_demo.py`).
 
 Mit Claude Code von K&K AI gebaut.
+
+---
+
+Gefällt dir pixelcut? Ein Kaffee hilft, es weiterzubauen: [ko-fi.com/kkwonderland](https://ko-fi.com/kkwonderland)

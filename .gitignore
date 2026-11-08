@@ -1,3 +1,7 @@
 __pycache__/
 *.pyc
 out/
+pixelcut.egg-info/
+build/
+dist/
+*.spec
