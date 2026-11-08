@@ -178,12 +178,12 @@ def cmd_split(a):
     rgb = load_rgb(a.input)
     h, w = rgb.shape[:2]
     rgba = np.dstack([rgb, np.full(rgb.shape[:2], 255, np.uint8)]) if a.opaque else color_to_alpha(rgb)
-    if rgb.min(2).max() >= 250 and (rgb.min(2) < 250).sum() == 0:
-        sys.exit("the image is completely white - nothing to cut")
+    if not a.opaque and (rgb.min(2) < 250).sum() == 0:
+        sys.exit("the image is completely white - nothing to cut (use --opaque to cut it anyway)")
     if a.centre == "auto":                                    # centroid of everything that is not white
         m = (rgb.min(2) < 250).astype(np.uint8)
         M = cv2.moments(m, True)
-        centre = (M["m10"] / M["m00"], M["m01"] / M["m00"])
+        centre = (M["m10"] / M["m00"], M["m01"] / M["m00"]) if M["m00"] > 0 else (w / 2.0, h / 2.0)
     else:
         try:
             centre = tuple(float(v) for v in a.centre.split(","))
@@ -224,6 +224,12 @@ def cmd_split(a):
             sector[cc] = np.bincount(sector[cc].ravel()).argmax()
     out = Path(a.outdir)
     out.mkdir(parents=True, exist_ok=True)
+    leftover = out / ".pixelcut_old"                          # an earlier run was interrupted while swapping: its old set is the only full copy
+    if leftover.is_dir():
+        for f in leftover.iterdir():
+            os.replace(f, out / f.name)
+        shutil.rmtree(leftover)
+        print("note: an interrupted earlier run was rolled back first (previous parts restored)", file=sys.stderr)
     old_manifest = out / "parts.json"                        # only files that an earlier pixelcut run listed may be replaced
     ours = set()
     if old_manifest.exists():
@@ -237,6 +243,8 @@ def cmd_split(a):
         sys.exit("%s already exists in %s and was not written by pixelcut - use an empty folder" % (", ".join(clash), out))
     staging = out / ".pixelcut_new"                           # everything is written here first, replacing happens only when all parts worked
     if staging.exists():
+        if any(not (PART_NAME.fullmatch(f.name) or f.name == "parts.json") for f in staging.iterdir()):
+            sys.exit("%s exists and does not look like pixelcut's own scratch folder - remove it first" % staging)
         shutil.rmtree(staging)
     staging.mkdir()
     ink = np.array([20, 16, 14], np.uint8)
@@ -257,9 +265,7 @@ def cmd_split(a):
     files = ["part_%d.png" % k for k in range(len(parts))]
     (staging / "parts.json").write_text(json.dumps({"size": [w, h], "centre": list(centre), "files": files, "parts": info}, indent=1))
     backup = out / ".pixelcut_old"                            # old files are moved aside, not deleted - an abort rolls back
-    if backup.exists():
-        shutil.rmtree(backup)
-    backup.mkdir()
+    backup.mkdir()                                            # (a leftover one was restored above, so this is always new)
     moved = []
     try:
         for name in sorted(ours | {"parts.json"}):
@@ -439,6 +445,9 @@ def cmd_trace(a):
     if a.render:
         import subprocess
         import tempfile
+        render_target = Path(a.render).resolve()
+        if render_target in (Path(a.input).resolve(), Path(a.output).resolve()):
+            sys.exit("error: --render must be a different file than the input and the SVG")
         chrome = find_chrome()
         if not chrome:
             sys.exit("--render needs Chrome/Edge/Brave")
@@ -446,14 +455,13 @@ def cmd_trace(a):
         t = Path(tempfile.mkdtemp())
         (t / "p.html").write_text('<html><body style="margin:0;background:#fff"><img src="%s" width=%d height=%d></body></html>'
                                   % (Path(a.output).resolve().as_uri(), w, h))
-        render_target = Path(a.render).resolve()
-        if render_target.exists():
-            render_target.unlink()
+        shot = t / "shot.png"                                 # render aside, replace the target only when it worked
         subprocess.run([chrome, "--headless=new", "--disable-gpu", "--hide-scrollbars", "--allow-file-access-from-files",
-                        "--user-data-dir=" + str(t / "prof"), "--window-size=%d,%d" % (w, h), "--screenshot=" + str(Path(a.render).resolve()),
+                        "--user-data-dir=" + str(t / "prof"), "--window-size=%d,%d" % (w, h), "--screenshot=" + str(shot),
                         (t / "p.html").as_uri()], capture_output=True, timeout=120)
-        if not Path(a.render).exists():
-            sys.exit("error: Chrome did not produce %s" % a.render)
+        if not shot.exists():
+            sys.exit("error: Chrome did not produce a picture - %s was left as it was" % a.render)
+        shutil.move(str(shot), str(render_target))
         print("rendered", a.render)
 
 
@@ -486,6 +494,8 @@ def ensure_esrgan():
     print("realesrgan-ncnn-vulkan not found - downloading the official release (~50 MB, once) ...")
     try:
         import hashlib
+        import socket
+        socket.setdefaulttimeout(60)                          # a dead connection must end in the Lanczos fallback, not hang
         urllib.request.urlretrieve(ESRGAN_URL % osname, zpath)
         if hashlib.sha256(zpath.read_bytes()).hexdigest() != ESRGAN_SHA256[osname]:
             zpath.unlink()
@@ -521,12 +531,16 @@ def cmd_upscale(a):
     import subprocess
     if not 1 <= a.scale <= 8:
         sys.exit("--scale must be a whole number from 1 to 8")
+    if a.no_ai:
+        return lanczos_upscale(a, "--no-ai")
     exe = a.bin or ensure_esrgan()
     if not exe:
         return lanczos_upscale(a, "no build for this machine")
     try:
         subprocess.run([exe, "-i", str(Path(a.input).resolve()), "-o", str(Path(a.output).resolve()), "-n", a.model, "-s", str(a.scale)],
-                       check=True, cwd=str(Path(exe).parent), capture_output=True)
+                       check=True, cwd=str(Path(exe).parent), capture_output=True, timeout=1800)
+    except subprocess.TimeoutExpired:
+        return lanczos_upscale(a, "the engine did not finish in 30 minutes")
     except OSError as e:
         return lanczos_upscale(a, "cannot start: %s" % e)
     except subprocess.CalledProcessError:
@@ -586,6 +600,7 @@ def main(argv=None):
     s.add_argument("input"); s.add_argument("output")
     s.add_argument("--scale", type=int, default=4); s.add_argument("--model", default="realesrgan-x4plus-anime")
     s.add_argument("--bin", help="path to realesrgan-ncnn-vulkan (default: automatic)")
+    s.add_argument("--no-ai", action="store_true", help="plain Lanczos resize: no download, no engine, works offline")
     s.set_defaults(fn=cmd_upscale)
 
     a = p.parse_args(argv)

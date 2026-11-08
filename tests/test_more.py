@@ -390,3 +390,36 @@ def test_split_rolls_back_when_the_swap_is_interrupted(tmp_path, monkeypatch):
         pixelcut.main()
     after = {f.name: f.read_bytes() for f in out.iterdir()}
     assert after == before                                         # old set intact, no staging/backup left over
+
+
+def test_interrupted_swap_is_restored_not_deleted(tmp_path):
+    out = tmp_path / "i"
+    cli("split", EX / "photo_cat.png", out, "--opaque", "--angles", "0,180", "--gap", "0", "--edge", "0")
+    before = {f.name: f.read_bytes() for f in out.iterdir()}
+    old = out / ".pixelcut_old"                                    # simulate a crash right after the old set was moved aside
+    old.mkdir()
+    for n in ("part_0.png", "part_1.png", "parts.json"):
+        (out / n).replace(old / n)
+    (out / "part_0.png").write_bytes(b"half written new file")
+    r = cli("split", EX / "photo_cat.png", out, "--opaque", "--angles", "0,180", "--gap", "0", "--edge", "0")
+    assert "rolled back" in r.stderr
+    assert not old.exists() and not (out / ".pixelcut_new").exists()
+    assert {f.name: f.read_bytes() for f in out.iterdir()} == before
+
+
+def test_bright_but_not_white_image_can_be_cut_opaque(tmp_path):
+    Image.new("RGB", (40, 30), (254, 254, 254)).save(tmp_path / "w.png")
+    cli("split", tmp_path / "w.png", tmp_path / "o", "--opaque", "--angles", "0,180", "--gap", "0", "--edge", "0")
+    assert (tmp_path / "o" / "parts.json").exists()
+    assert "completely white" in fails("split", tmp_path / "w.png", tmp_path / "o2")
+
+
+def test_upscale_no_ai_works_offline(tmp_path):
+    Image.new("RGB", (10, 8), "red").save(tmp_path / "s.png")
+    cli("upscale", tmp_path / "s.png", tmp_path / "b.png", "--scale", "3", "--no-ai")
+    assert Image.open(tmp_path / "b.png").size == (30, 24)
+
+
+def test_trace_render_never_overwrites_input(tmp_path):
+    Image.new("RGB", (20, 20), "black").save(tmp_path / "x.png")
+    assert "different file" in fails("trace", tmp_path / "x.png", tmp_path / "x.svg", "--render", tmp_path / "x.png")
