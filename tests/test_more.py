@@ -484,8 +484,20 @@ def test_crash_while_growing_the_set_restores_the_old_one(tmp_path):
     old.mkdir()
     for n in ("part_0.png", "part_1.png", "parts.json"):
         (out / n).replace(old / n)
-    (old / ".journal.json").write_text(json.dumps(["part_0.png", "part_1.png", "part_2.png", "part_3.png", "parts.json"]))
+    (old / ".journal.json").write_text(json.dumps(["part_0.png", "part_2.png"]))
     (out / "part_0.png").write_bytes(b"new")
     (out / "part_2.png").write_bytes(b"new")
     cli("split", EX / "photo_cat.png", out, "--opaque", "--angles", "0,90,180,270", "--gap", "0", "--edge", "0")
     assert len(list(out.glob("part_*.png"))) == 4                  # the retry worked: part_2 was not mistaken for a foreign file
+
+
+def test_crash_after_first_backup_step_keeps_the_unmoved_original(tmp_path):
+    out = tmp_path / "u"
+    cli("split", EX / "photo_cat.png", out, "--opaque", "--angles", "0,180", "--gap", "0", "--edge", "0")
+    before = {f.name: f.read_bytes() for f in out.iterdir()}
+    old = out / ".pixelcut_old"                                    # crash after moving ONLY part_0 aside; part_1 + parts.json still original
+    old.mkdir()
+    (out / "part_0.png").replace(old / "part_0.png")
+    (old / ".journal.json").write_text("[]")
+    cli("split", EX / "photo_cat.png", out, "--opaque", "--angles", "0,180", "--gap", "0", "--edge", "0")
+    assert {f.name: f.read_bytes() for f in out.iterdir()} == before

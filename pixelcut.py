@@ -282,7 +282,7 @@ def cmd_split(a):
     (staging / "parts.json").write_text(json.dumps({"size": [w, h], "centre": list(centre), "files": files, "parts": info}, indent=1))
     backup = out / ".pixelcut_old"                            # old files are moved aside, not deleted - an abort rolls back
     backup.mkdir()                                            # (a leftover one was restored above, so this is always new)
-    (backup / JOURNAL).write_text(json.dumps(files + ["parts.json"]))     # tells a later recovery which files this run may have installed
+    (backup / JOURNAL).write_text("[]")                       # names this run is installing, written BEFORE each install (all old files are aside by then)
     moved, installed = [], []
     try:
         for name in sorted(ours | {"parts.json"}):
@@ -290,11 +290,13 @@ def cmd_split(a):
                 os.replace(out / name, backup / name)
                 moved.append(name)
         for name in files + ["parts.json"]:
-            os.replace(staging / name, out / name)
             installed.append(name)
+            (backup / JOURNAL).write_text(json.dumps(installed))
+            os.replace(staging / name, out / name)
     except BaseException:
         for name in installed:                                # take back exactly what this run put in place, then restore the old set
-            (out / name).unlink()
+            if (out / name).is_file():
+                (out / name).unlink()
         for name in moved:
             os.replace(backup / name, out / name)
         shutil.rmtree(backup, ignore_errors=True)
