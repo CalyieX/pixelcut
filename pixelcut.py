@@ -31,6 +31,13 @@ from PIL import Image
 def load_rgb(path):
     """8-bit RGB. Transparency is composited over white and 16-bit data is scaled to 8 bit - both with a notice, never silently."""
     im = Image.open(path)
+    deep = cv2.imdecode(np.fromfile(str(path), np.uint8), cv2.IMREAD_UNCHANGED)       # Pillow cuts 48-bit RGB silently
+    if deep is not None and deep.dtype == np.uint16 and deep.ndim == 3:
+        print("note: %s is 16 bit per channel - scaled to 8 bit, so the result is not exact for the full range" % path, file=sys.stderr)
+        deep = deep[:, :, :3][:, :, ::-1] if deep.shape[2] >= 3 else np.dstack([deep[:, :, 0]] * 3)
+        return np.clip(deep.astype(np.float64) / 257.0 + 0.5, 0, 255).astype(np.uint8)
+    if im.mode == "CMYK":
+        print("note: %s is CMYK - converted to RGB, colours are not exact" % path, file=sys.stderr)
     if im.mode in ("I;16", "I;16L", "I;16B", "I", "F"):
         print("note: %s is %s (more than 8 bit) - scaled to 8 bit, so the result is not exact for the full range" % (path, im.mode), file=sys.stderr)
         arr = np.array(im).astype(np.float64)
@@ -42,6 +49,12 @@ def load_rgb(path):
         bg = Image.new("RGBA", im.size, (255, 255, 255, 255))
         im = Image.alpha_composite(bg, im)
     return np.array(im.convert("RGB"))
+
+
+def finite(values, what):
+    if not all(np.isfinite(values)):
+        sys.exit("%s must be finite numbers" % what)
+    return values
 
 
 def color_to_alpha(rgb):
@@ -75,6 +88,23 @@ def contour_polygon(mask, eps):
     c = max(cs, key=cv2.contourArea)
     ap = cv2.approxPolyDP(c, eps, True)[:, 0, :]
     return [[int(x), int(y)] for x, y in ap]
+
+
+def contour_polygons(mask, eps, min_area=4):
+    """Every connected area as {outer, holes}: rings and islands are kept, unlike contour_polygon (largest outline only)."""
+    cs, hier = cv2.findContours(mask.astype(np.uint8), cv2.RETR_CCOMP, cv2.CHAIN_APPROX_NONE)
+    out = []
+    if hier is None:
+        return out
+    hier = hier[0]
+
+    def ring(c):
+        return [[int(x), int(y)] for x, y in cv2.approxPolyDP(c, eps, True)[:, 0, :]]
+    for i, c in enumerate(cs):
+        if hier[i][3] == -1 and cv2.contourArea(c) >= min_area:                       # outer ring; holes are its children
+            holes = [ring(cs[j]) for j in range(len(cs)) if hier[j][3] == i and cv2.contourArea(cs[j]) >= min_area]
+            out.append({"outer": ring(c), "holes": holes})
+    return out
 
 
 def fattest_point(mask):
@@ -145,8 +175,12 @@ def cmd_split(a):
             assert len(centre) == 2
         except (ValueError, AssertionError):
             sys.exit("--centre must look like 300,240 (x,y) or 'auto'")
+    finite(list(centre), "--centre")
+    if a.simplify < 0 or not np.isfinite(a.simplify):
+        sys.exit("--simplify must be 0 or greater")
     try:
         angles = [float(v) for v in a.angles.split(",")]
+        finite(angles, "--angles")
     except ValueError:
         sys.exit("--angles must be numbers separated by commas, e.g. 32,148,214,327")
     if len(angles) < 2 or len({round(v % 360, 6) for v in angles}) != len(angles):
@@ -161,10 +195,22 @@ def cmd_split(a):
         big = 1 + int(np.argmax(st[1:, cv2.CC_STAT_AREA]))
         region = cv2.dilate((lab == big).astype(np.uint8), np.ones((5, 5), np.uint8)) > 0
     sector, slit, edge_zone, order = split_sectors((h, w), centre, angles, a.tooth, a.depth, a.gap, a.edge, region)
+    if region is not None:                                    # satellites stay whole: one sector per connected area outside the main blob
+        content = cv2.morphologyEx((rgb.min(2) < 250).astype(np.uint8), cv2.MORPH_CLOSE, np.ones((7, 7), np.uint8))
+        nl, lab, _, _ = cv2.connectedComponentsWithStats(np.where(region, 0, content).astype(np.uint8))
+        for c in range(1, nl):
+            cc = lab == c
+            sector[cc] = np.bincount(sector[cc].ravel()).argmax()
     out = Path(a.outdir)
     out.mkdir(parents=True, exist_ok=True)
-    for old in out.glob("part_*.png"):                       # parts of an earlier run must not leak into join
-        old.unlink()
+    old_manifest = out / "parts.json"                        # only files that an earlier pixelcut run listed are replaced
+    if old_manifest.exists():
+        try:
+            for name in json.loads(old_manifest.read_text()).get("files", []):
+                if Path(name).name == name and (out / name).is_file():
+                    (out / name).unlink()
+        except (ValueError, OSError):
+            pass
     ink = np.array([20, 16, 14], np.uint8)
     parts, info = [], []
     for k in range(len(angles)):
@@ -178,8 +224,10 @@ def cmd_split(a):
         Image.fromarray(img, "RGBA").save(out / ("part_%d.png" % k))
         solid = ((sector == k) & ~slit & (rgba[:, :, 3] > 8)).astype(np.uint8)
         info.append({"part": k, "starts_at_angle": sorted(angles)[k],
-                     "polygon": contour_polygon(solid, a.simplify), "fattest_point": fattest_point(solid)})
-    (out / "parts.json").write_text(json.dumps({"size": [w, h], "centre": list(centre), "parts": info}, indent=1))
+                     "polygon": contour_polygon(solid, a.simplify), "polygons": contour_polygons(solid, a.simplify),
+                     "fattest_point": fattest_point(solid)})
+    files = ["part_%d.png" % k for k in range(len(parts))]
+    (out / "parts.json").write_text(json.dumps({"size": [w, h], "centre": list(centre), "files": files, "parts": info}, indent=1))
     print("wrote %d parts + parts.json to %s" % (len(parts), out))
     if a.verify:
         # without slit and edge the parts must add up to the original over white
@@ -197,7 +245,14 @@ def cmd_split(a):
 def cmd_key(a):
     rgb = load_rgb(a.input)
     h, w = rgb.shape[:2]
-    x0, y0, x1, y1 = (int(v) for v in a.box.split(","))
+    try:
+        x0, y0, x1, y1 = (int(v) for v in a.box.split(","))
+    except ValueError:
+        sys.exit("--box must look like x0,y0,x1,y1 (four whole numbers)")
+    if not (0 <= x0 < x1 <= w and 0 <= y0 < y1 <= h):
+        sys.exit("--box %s does not lie inside the image (%dx%d) or is empty/reversed" % (a.box, w, h))
+    if not 0 < a.scale <= 10:
+        sys.exit("--scale must be greater than 0 and at most 10")
     roi = rgb[y0:y1, x0:x1].astype(np.float32)
     ring = np.concatenate([roi[:3].reshape(-1, 3), roi[-3:].reshape(-1, 3), roi[:, :3].reshape(-1, 3), roi[:, -3:].reshape(-1, 3)])
     fill = np.median(ring, 0)                                  # the flat colour the element sits on
@@ -208,13 +263,19 @@ def cmd_key(a):
     fg = np.zeros_like(fg)
     cv2.drawContours(fg, cs, -1, 1, -1)                        # holes (counters, highlights) filled
     ys, xs = np.nonzero(fg)
+    if len(xs) == 0:
+        sys.exit("nothing stands out from the background inside --box (try a lower --threshold)")
     bx0, bx1, by0, by1 = xs.min(), xs.max(), ys.min(), ys.max()
     # heal the hole with the flat colour, softly blended
     soft = cv2.GaussianBlur(cv2.dilate(fg, np.ones((5, 5), np.uint8)).astype(np.float32), (0, 0), 1.2)[:, :, None]
     healed = rgb.astype(np.float32).copy()
     healed[y0:y1, x0:x1] = roi * (1 - soft) + fill * soft
     # the element: exact pixels, shrunk, centred on (cx, cy)
-    cx, cy = (float(v) for v in a.to.split(",")) if a.to else ((x0 + x1) / 2, (y0 + y1) / 2)
+    try:
+        cx, cy = (float(v) for v in a.to.split(",")) if a.to else ((x0 + x1) / 2, (y0 + y1) / 2)
+    except ValueError:
+        sys.exit("--to must look like x,y")
+    finite([cx, cy], "--to")
     el = rgb[y0:y1, x0:x1][by0:by1 + 1, bx0:bx1 + 1]
     al = cv2.GaussianBlur(fg[by0:by1 + 1, bx0:bx1 + 1].astype(np.float32), (0, 0), .8)
     kw, kh = max(1, int(round(el.shape[1] * a.scale))), max(1, int(round(el.shape[0] * a.scale)))
@@ -222,6 +283,8 @@ def cmd_key(a):
     al = cv2.resize(al, (kw, kh), interpolation=cv2.INTER_AREA)
     layer = np.zeros((h, w, 4), np.uint8)
     px, py = int(round(cx - kw / 2)), int(round(cy - kh / 2))
+    if px < 0 or py < 0 or px + kw > w or py + kh > h:
+        sys.exit("the element would leave the image at --to %s (needs %dx%d px around that point)" % (a.to, kw, kh))
     layer[py:py + kh, px:px + kw, :3] = el
     layer[py:py + kh, px:px + kw, 3] = np.clip(al * 255, 0, 255).astype(np.uint8)
     out = Path(a.outdir)
@@ -240,15 +303,26 @@ def cmd_key(a):
 def cmd_join(a):
     """Put parts back together (over white or a colour) - the way to 'rebuild' a picture from its exact pieces."""
     manifest = Path(a.parts) / "parts.json"
-    if manifest.exists():                                     # the manifest says which parts belong together
-        n = len(json.loads(manifest.read_text())["parts"])
+    size = None
+    if manifest.exists():                                     # the manifest says which parts belong together - all of them are needed
+        try:
+            m = json.loads(manifest.read_text())
+            n = len(m["parts"])
+            size = tuple(m["size"])
+        except (ValueError, KeyError, TypeError):
+            sys.exit("parts.json is damaged (needs 'size' and 'parts')")
         files = [Path(a.parts) / ("part_%d.png" % k) for k in range(n)]
-        files = [f for f in files if f.exists()]
+        missing = [f.name for f in files if not f.exists()]
+        if missing:
+            sys.exit("parts.json lists %d parts but these are missing: %s" % (n, ", ".join(missing)))
     else:
         files = sorted(Path(a.parts).glob("part_*.png"))
     if not files:
         sys.exit("no part_*.png in %s" % a.parts)
     ims = [np.array(Image.open(f).convert("RGBA")) for f in files]
+    shapes = {im.shape[:2] for im in ims}
+    if len(shapes) != 1 or (size and (size[1], size[0]) not in shapes):
+        sys.exit("the parts do not all have the same size%s" % (" as parts.json says" if size else ""))
     out = over_white(ims)
     Image.fromarray(np.clip(out, 0, 255).round().astype(np.uint8)).save(a.output)
     print("joined %d parts -> %s" % (len(ims), a.output))
@@ -292,6 +366,8 @@ def find_chrome():
 def cmd_trace(a):
     """Redraw the picture as vector shapes (vtracer). Approximate by nature: use `compare` to see how far it is from the original."""
     import vtracer
+    if not Path(a.input).is_file():
+        sys.exit("error: %s does not exist" % a.input)
     vtracer.convert_image_to_svg_py(a.input, a.output, colormode="color", hierarchical="stacked", mode="spline",
                                     filter_speckle=a.speckle, color_precision=a.colors, layer_difference=a.layers,
                                     corner_threshold=60, length_threshold=3.5, splice_threshold=45, path_precision=3)
@@ -312,6 +388,9 @@ def cmd_trace(a):
         print("rendered", a.render)
 
 
+ESRGAN_SHA256 = {"windows": "abc02804e17982a3be33675e4d471e91ea374e65b70167abc09e31acb412802d",
+                 "ubuntu": "e5aa6eb131234b87c0c51f82b89390f5e3e642b7b70f2b9bbe95b6a285a40c96",
+                 "macos": "e0ad05580abfeb25f8d8fb55aaf7bedf552c375b5b4d9bd3c8d59764d2cc333a"}
 ESRGAN_URL = "https://github.com/xinntao/Real-ESRGAN/releases/download/v0.2.5.0/realesrgan-ncnn-vulkan-20220424-%s.zip"
 
 
@@ -337,8 +416,16 @@ def ensure_esrgan():
     zpath = cache / "release.zip"
     print("realesrgan-ncnn-vulkan not found - downloading the official release (~50 MB, once) ...")
     try:
+        import hashlib
         urllib.request.urlretrieve(ESRGAN_URL % osname, zpath)
+        if hashlib.sha256(zpath.read_bytes()).hexdigest() != ESRGAN_SHA256[osname]:
+            zpath.unlink()
+            print("download rejected: checksum does not match the known Real-ESRGAN release")
+            return None
         with zipfile.ZipFile(zpath) as z:
+            for member in z.namelist():                       # no path may leave the cache folder
+                if not (cache / member).resolve().is_relative_to(cache.resolve()):
+                    raise ValueError("unsafe path in archive: %s" % member)
             z.extractall(cache)
         zpath.unlink()
     except Exception as e:
@@ -353,7 +440,8 @@ def ensure_esrgan():
 def lanczos_upscale(a, why):
     """Fallback without AI: plain Lanczos resize. Smooth, but no invented detail."""
     print("Real-ESRGAN not usable here (%s) - using plain Lanczos resize instead (no AI detail)." % why)
-    im = Image.open(a.input).convert("RGB")
+    im = Image.open(a.input)
+    im = im.convert("RGBA" if (im.mode in ("RGBA", "LA", "PA") or "transparency" in im.info) else "RGB")   # keep transparency
     im.resize((im.width * a.scale, im.height * a.scale), Image.LANCZOS).save(a.output)
     print("wrote", a.output)
 
@@ -432,7 +520,7 @@ def main(argv=None):
     a = p.parse_args(argv)
     try:
         a.fn(a)
-    except (FileNotFoundError, ValueError, ZeroDivisionError, OSError) as e:
+    except (FileNotFoundError, ValueError, ZeroDivisionError, OSError, KeyError, cv2.error) as e:
         if os.environ.get("PIXELCUT_DEBUG"):
             raise
         sys.exit("error: %s (set PIXELCUT_DEBUG=1 for the full trace)" % e)

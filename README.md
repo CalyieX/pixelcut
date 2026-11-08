@@ -35,7 +35,18 @@ Legt man die Teile wieder zusammen, kommt das Original zurück, Pixel für Pixel
 
 ## Download (ohne Python)
 
-Fertige Programme für Windows, Linux (x64 und ARM) und Mac (Apple Silicon und Intel) gibt es unter [Releases](https://github.com/CalyieX/pixelcut/releases/latest). Herunterladen, starten, fertig. Jedes Programm wurde vor dem Hochladen mit einem Rundlauftest geprüft.
+Fertige Programme für Windows, Linux (x64 und ARM) und Mac (Apple Silicon und Intel) gibt es unter [Releases](https://github.com/CalyieX/pixelcut/releases/latest). Jedes Programm wurde vor dem Hochladen auf seinem eigenen System mit einem Rundlauftest geprüft.
+
+```bash
+# Linux / Mac: einmal ausführbar machen, dann starten
+chmod +x pixelcut-linux-x64        # bzw. pixelcut-macos-arm64
+./pixelcut-linux-x64 --help
+
+# Windows (PowerShell)
+.\pixelcut-windows-x64.exe --help
+```
+
+Mac: Beim ersten Start meldet macOS evtl. „nicht verifizierter Entwickler“. Dann in den Systemeinstellungen unter „Datenschutz & Sicherheit“ auf „Trotzdem öffnen“ klicken, oder `xattr -d com.apple.quarantine pixelcut-macos-arm64` ausführen. Die Programme sind nicht signiert.
 
 ---
 
@@ -50,7 +61,7 @@ python pixelcut.py -h
 
 Alles ist in `requirements.txt` enthalten, auch `trace` (vtracer) und `compare` (SSIM). Für `upscale` lädt das Tool beim ersten Aufruf von selbst die offizielle Real-ESRGAN-Version (ca. 50 MB, einmalig nach `~/.cache/pixelcut`). Du musst nichts weiter einrichten. Läuft Real-ESRGAN auf dem Rechner nicht (ARM-Linux oder keine Vulkan-Grafikkarte), skaliert das Tool stattdessen mit Lanczos und sagt es dazu.
 
-Getestet unter Windows mit Python 3.12. Die Bibliotheken laufen auch unter Linux und macOS, das habe ich aber nicht selbst geprüft.
+Getestet bei jedem Commit auf GitHub Actions: Windows, Linux (x64 und ARM) und macOS (Apple Silicon und Intel), jeweils mit Python 3.9, 3.12 und 3.13. Das Badge oben zeigt den aktuellen Stand. Nur `upscale` mit Real-ESRGAN braucht eine Vulkan-fähige Grafikkarte und x86-64; sonst skaliert das Tool mit Lanczos und sagt das dazu.
 
 ---
 
@@ -74,8 +85,8 @@ python pixelcut.py split bild.png out --angles 32,148,214,327 --tooth 18 --depth
 - **Freie Winkel.** `--angles` gibt die Trennlinien an (0 = rechts, 90 = unten). Sie dürfen **ungleich und schräg** sein, also keine Viertel, sondern zum Beispiel ein X, dessen Arme nicht gleich verteilt sind.
 - **Gerade oder Zacken.** `--depth 0` = gerade Linie. Mit `--depth` und `--tooth` wird aus der Linie ein Zickzack mit scharfen Zähnen.
 - **Spalt und Tintenkante.** `--gap` lässt einen schmalen Spalt zwischen den Teilen, `--edge` zeichnet eine dünne dunkle Kante an die Schnittkante (Comic-Look). Beides lässt sich auf 0 stellen.
-- **Nur die Hauptform schneiden.** `--only-inside` schneidet nur den größten zusammenhängenden Bereich. Wolken, Sterne und Punkte drumherum bleiben ganz.
-- **Trefferflächen.** `parts.json` enthält pro Teil ein Polygon und den dicksten Punkt (guter Platz für ein Symbol). Damit baut man Touch-Menüs, Klickflächen und Hotspots. Im Original-Projekt: Android `Path` + `Region`.
+- **Nur die Hauptform schneiden.** `--only-inside` schneidet nur den größten zusammenhängenden Bereich. Wolken, Sterne und Punkte drumherum bleiben ganz und gehören jeweils einem einzigen Teil (dem, in dem die meiste Fläche liegt).
+- **Trefferflächen.** `parts.json` enthält pro Teil `polygon` (größte Außenkontur), `polygons` (alle getrennten Flächen mit ihren Löchern) und den dicksten Punkt (guter Platz für ein Symbol). Damit baut man Touch-Menüs, Klickflächen und Hotspots. Im Original-Projekt: Android `Path` + `Region`.
 - **Fotos.** `--opaque` lässt jedes Pixel deckend, damit helle Bildstellen nicht angetastet werden.
 
 Ausgabe: `part_0.png … part_N.png` (RGBA, gleiche Größe wie das Original, nur die Pixel des Teils sind sichtbar) und `parts.json`.
@@ -177,11 +188,11 @@ Ausschnitt 3x vergrößert. Nur pixelcut ist vom Original nicht zu unterscheiden
 ## Tests
 
 ```bash
-pip install pytest scikit-image
+pip install -e ".[test]"
 pytest -q
 ```
 
-Prüft, dass die Teile über Weiß das Original ergeben (Zeichnung und Foto, Abweichung ≤ 1/255, beim Foto exakt 0) und dass `join` ein Foto bit-genau zurückgibt.
+48 Tests. Sie prüfen die gespeicherten Dateien: Rundlauf split + join ist exakt (Zeichnung, Foto, gerade und Zickzack), die Teile überlappen nicht, Polygone, Winkel, Mitte, Größe und dickster Punkt stimmen mit den Teilen überein, `compare`, `key` und `alpha` rechnen richtig, `join` verweigert fehlende oder falsch große Teile, `split` fasst fremde Dateien nicht an, und schlechte Eingaben ergeben eine klare Fehlerzeile. Eingebaute Fehler (Mutationen) werden gefangen.
 
 ---
 
