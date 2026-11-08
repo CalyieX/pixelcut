@@ -8,7 +8,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-latest, ubuntu-24.04-arm, macos-latest, macos-13, windows-latest]
+        os: [ubuntu-24.04, ubuntu-24.04-arm, macos-latest, macos-15-intel, windows-latest]
         python: ["3.9", "3.12", "3.13"]
         exclude:
           - { os: macos-latest, python: "3.9" }   # Apple-Silicon-Runner bietet 3.9 nicht an
