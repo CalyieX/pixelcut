@@ -10,8 +10,8 @@ Commands
   split   cut into wedges around a centre, dividing lines at free angles, straight or zig-zag, with hit-area polygons
   join    put the parts back together over white (exact)
   compare SSIM + pixel difference of two images
-  trace   (optional, vtracer) redraw as SVG - approximate
-  upscale (optional, Real-ESRGAN) AI upscale - invents pixels
+  trace   (vtracer) redraw as SVG - approximate
+  upscale (Real-ESRGAN, auto-download) AI upscale - invents pixels
   key     lift a foreground element (e.g. a word) out of a flat area, shrink it, put it in the middle, heal the hole
 
 Run `python pixelcut.py COMMAND -h` for the options.
@@ -271,15 +271,45 @@ def cmd_trace(a):
         print("rendered", a.render)
 
 
+ESRGAN_URL = "https://github.com/xinntao/Real-ESRGAN/releases/download/v0.2.5.0/realesrgan-ncnn-vulkan-20220424-%s.zip"
+
+
+def ensure_esrgan():
+    """Find realesrgan-ncnn-vulkan; if it is missing, download the official release once into ~/.cache/pixelcut."""
+    import shutil
+    import urllib.request
+    import zipfile
+    found = shutil.which("realesrgan-ncnn-vulkan")
+    if found:
+        return found
+    osname = {"win32": "windows", "darwin": "macos"}.get(sys.platform, "ubuntu")
+    exename = "realesrgan-ncnn-vulkan" + (".exe" if osname == "windows" else "")
+    cache = Path.home() / ".cache" / "pixelcut" / "realesrgan"
+    exe = next(cache.rglob(exename), None) if cache.exists() else None
+    if exe:
+        return str(exe)
+    cache.mkdir(parents=True, exist_ok=True)
+    zpath = cache / "release.zip"
+    print("realesrgan-ncnn-vulkan not found - downloading the official release (~50 MB, once) ...")
+    urllib.request.urlretrieve(ESRGAN_URL % osname, zpath)
+    with zipfile.ZipFile(zpath) as z:
+        z.extractall(cache)
+    zpath.unlink()
+    exe = next(cache.rglob(exename), None)
+    if not exe:
+        sys.exit("download worked but %s was not found in the archive" % exename)
+    if osname != "windows":
+        exe.chmod(0o755)
+    return str(exe)
+
+
 def cmd_upscale(a):
     """AI upscale with Real-ESRGAN (realesrgan-ncnn-vulkan). New pixels are invented: sharper, but not exact any more."""
-    import shutil
     import subprocess
-    exe = a.bin or shutil.which("realesrgan-ncnn-vulkan")
-    if not exe:
-        sys.exit("realesrgan-ncnn-vulkan not found: get it from https://github.com/xinntao/Real-ESRGAN/releases and pass --bin PATH")
+    exe = a.bin or ensure_esrgan()
     subprocess.run([exe, "-i", str(Path(a.input).resolve()), "-o", str(Path(a.output).resolve()), "-n", a.model, "-s", str(a.scale)], check=True, cwd=str(Path(exe).parent))
     print("wrote", a.output)
+
 
 # ----------------------------------------------------------------------------- cli
 def main(argv=None):
@@ -322,16 +352,16 @@ def main(argv=None):
     s.add_argument("first"); s.add_argument("second")
     s.set_defaults(fn=cmd_compare)
 
-    s = sub.add_parser("trace", help="(optional, needs vtracer) redraw as SVG: approximate")
+    s = sub.add_parser("trace", help="redraw as SVG (vtracer): approximate")
     s.add_argument("input"); s.add_argument("output")
     s.add_argument("--render", help="also render the SVG to this PNG (needs Chrome/Edge/Brave)")
     s.add_argument("--speckle", type=int, default=2); s.add_argument("--colors", type=int, default=7); s.add_argument("--layers", type=int, default=8)
     s.set_defaults(fn=cmd_trace)
 
-    s = sub.add_parser("upscale", help="(optional, needs realesrgan-ncnn-vulkan) AI upscale: invents pixels")
+    s = sub.add_parser("upscale", help="AI upscale (Real-ESRGAN, downloaded automatically on first use): invents pixels")
     s.add_argument("input"); s.add_argument("output")
     s.add_argument("--scale", type=int, default=4); s.add_argument("--model", default="realesrgan-x4plus-anime")
-    s.add_argument("--bin", help="path to realesrgan-ncnn-vulkan")
+    s.add_argument("--bin", help="path to realesrgan-ncnn-vulkan (default: automatic)")
     s.set_defaults(fn=cmd_upscale)
 
     a = p.parse_args(argv)

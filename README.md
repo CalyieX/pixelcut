@@ -38,12 +38,7 @@ pip install -r requirements.txt     # numpy, opencv-python-headless, Pillow
 python pixelcut.py -h
 ```
 
-Optional (nur für `trace`, `upscale` und `compare`):
-
-```bash
-pip install vtracer scikit-image    # trace (vtracer), compare (SSIM)
-# upscale: realesrgan-ncnn-vulkan von https://github.com/xinntao/Real-ESRGAN/releases, Pfad mit --bin angeben
-```
+Alles ist in `requirements.txt` enthalten, auch `trace` (vtracer) und `compare` (SSIM). Für `upscale` lädt das Tool beim ersten Aufruf von selbst die offizielle Real-ESRGAN-Version (ca. 50 MB, einmalig nach `~/.cache/pixelcut`). Du musst nichts weiter einrichten.
 
 Getestet unter Windows mit Python 3.12. Die Bibliotheken laufen auch unter Linux und macOS, das habe ich aber nicht selbst geprüft.
 
@@ -101,11 +96,11 @@ python pixelcut.py key bild.png out --box 172,170,428,310 --scale 0.55
 Hebt ein Element (zum Beispiel ein Wort) aus einer Fläche heraus, **mit den Original-Pixeln**, verkleinert es und setzt es in die Mitte. Die Lücke wird mit der Flächenfarbe gefüllt. Ausgabe: `base.png` (Bild ohne Element), `element.png` (Element auf transparentem Grund), `preview.png`.
 Voraussetzung: Der Rand der Box (`--box`) liegt auf **einfarbiger Fläche**, sonst stimmt die Füllfarbe nicht.
 
-### 6. `trace` und `upscale` (optional, nur zum Vergleichen)
+### 6. `trace` und `upscale` (nur zum Vergleichen)
 
 ```bash
 python pixelcut.py trace bild.png bild.svg --render bild_trace.png    # vtracer
-python pixelcut.py upscale bild.png gross.png --bin PFAD/realesrgan-ncnn-vulkan
+python pixelcut.py upscale bild.png gross.png    # holt Real-ESRGAN beim ersten Mal selbst
 ```
 
 Zwei Fremdverfahren, damit man selbst messen kann, wie weit sie vom Original abweichen. Beide **ändern Pixel** und sind nicht mehr exakt.
