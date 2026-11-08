@@ -36,7 +36,7 @@ Legt man die Teile wieder zusammen, kommt das Original zurück, Pixel für Pixel
 ```bash
 git clone https://github.com/CalyieX/pixelcut
 cd pixelcut
-pip install -r requirements.txt     # numpy, opencv-python-headless, Pillow
+pip install -r requirements.txt     # numpy, opencv, Pillow, scikit-image, vtracer
 python pixelcut.py -h
 ```
 
