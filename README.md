@@ -27,13 +27,15 @@ Die meisten "Bild nachbauen"-Werkzeuge zeichnen neu, tracen oder skalieren hoch.
 pixelcut macht das Gegenteil: Es behält die Original-Pixel und entscheidet nur, **zu welchem Teil jedes Pixel gehört**.
 Legt man die Teile wieder zusammen, kommt das Original zurück, Pixel für Pixel, und das Werkzeug misst das selbst nach (`--verify`, `compare`).
 
+**Bedingung:** Das gilt für 8-Bit-Bilder und mit `--gap 0 --edge 0`. Die Standardwerte (`--gap 2.6 --edge 3.2`) schneiden einen sichtbaren Spalt mit Tintenkante, damit man die Teile sieht. Dann weicht das Ergebnis gewollt ab; `--verify` zeigt beide Zahlen. Transparente Bilder werden über Weiß gelegt und 16-Bit-Bilder auf 8 Bit gebracht, beides mit Hinweis.
+
 ---
 
 ## Installation
 
 ```bash
 git clone https://github.com/CalyieX/pixelcut
-cd kk-pixelcut
+cd pixelcut
 pip install -r requirements.txt     # numpy, opencv-python-headless, Pillow
 python pixelcut.py -h
 ```
@@ -146,9 +148,9 @@ Ausschnitt 3x vergrößert. Nur pixelcut ist vom Original nicht zu unterscheiden
 
 | Verfahren | SSIM |
 |---|---|
-| [vtracer](https://github.com/visioncortex/vtracer) (Nachzeichnen) | 0,92 |
+| [vtracer](https://github.com/visioncortex/vtracer) (Nachzeichnen, Standardwerte des Tools) | 0,96 |
 | Farbquantisierung + Konturen ([image-to-svg](https://github.com/oaustegard/claude-skills)) | 0,78 |
-| **pixelcut** (Original-Pixel) | ≈ 1,00 (höchstens 0,5 von 255 bei der Zeichnung, 0,00 beim Foto) |
+| **pixelcut** (Original-Pixel) | ≈ 1,00 mit `--gap 0 --edge 0` (höchstens 0,5 von 255 bei der Zeichnung, 0,00 beim Foto) |
 
 ---
 

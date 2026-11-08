@@ -18,6 +18,7 @@ Run `python pixelcut.py COMMAND -h` for the options.
 """
 import argparse
 import json
+import os
 import sys
 from pathlib import Path
 
@@ -28,7 +29,19 @@ from PIL import Image
 
 # ----------------------------------------------------------------------------- helpers
 def load_rgb(path):
-    return np.array(Image.open(path).convert("RGB"))
+    """8-bit RGB. Transparency is composited over white and 16-bit data is scaled to 8 bit - both with a notice, never silently."""
+    im = Image.open(path)
+    if im.mode in ("I;16", "I;16L", "I;16B", "I", "F"):
+        print("note: %s is %s (more than 8 bit) - scaled to 8 bit, so the result is not exact for the full range" % (path, im.mode), file=sys.stderr)
+        arr = np.array(im).astype(np.float64)
+        top = 65535.0 if im.mode.startswith("I;16") else max(arr.max(), 1.0)
+        return np.dstack([np.clip(arr / top * 255 + 0.5, 0, 255).astype(np.uint8)] * 3)
+    if im.mode in ("RGBA", "LA", "PA") or (im.mode == "P" and "transparency" in im.info):
+        print("note: %s has transparency - composited over white" % path, file=sys.stderr)
+        im = im.convert("RGBA")
+        bg = Image.new("RGBA", im.size, (255, 255, 255, 255))
+        im = Image.alpha_composite(bg, im)
+    return np.array(im.convert("RGB"))
 
 
 def color_to_alpha(rgb):
@@ -120,13 +133,26 @@ def cmd_split(a):
     rgb = load_rgb(a.input)
     h, w = rgb.shape[:2]
     rgba = np.dstack([rgb, np.full(rgb.shape[:2], 255, np.uint8)]) if a.opaque else color_to_alpha(rgb)
+    if rgb.min(2).max() >= 250 and (rgb.min(2) < 250).sum() == 0:
+        sys.exit("the image is completely white - nothing to cut")
     if a.centre == "auto":                                    # centroid of everything that is not white
         m = (rgb.min(2) < 250).astype(np.uint8)
         M = cv2.moments(m, True)
         centre = (M["m10"] / M["m00"], M["m01"] / M["m00"])
     else:
-        centre = tuple(float(v) for v in a.centre.split(","))
-    angles = [float(v) for v in a.angles.split(",")]
+        try:
+            centre = tuple(float(v) for v in a.centre.split(","))
+            assert len(centre) == 2
+        except (ValueError, AssertionError):
+            sys.exit("--centre must look like 300,240 (x,y) or 'auto'")
+    try:
+        angles = [float(v) for v in a.angles.split(",")]
+    except ValueError:
+        sys.exit("--angles must be numbers separated by commas, e.g. 32,148,214,327")
+    if len(angles) < 2 or len({round(v % 360, 6) for v in angles}) != len(angles):
+        sys.exit("--angles needs at least two different angles")
+    if a.depth > 0 and a.tooth <= 0:
+        sys.exit("--tooth must be greater than 0 (or use --depth 0 for straight lines)")
     region = None
     if a.only_inside:                                         # cut only inside the largest non-white blob, leave satellites whole
         m = (rgb.min(2) < 250).astype(np.uint8)
@@ -137,6 +163,8 @@ def cmd_split(a):
     sector, slit, edge_zone, order = split_sectors((h, w), centre, angles, a.tooth, a.depth, a.gap, a.edge, region)
     out = Path(a.outdir)
     out.mkdir(parents=True, exist_ok=True)
+    for old in out.glob("part_*.png"):                       # parts of an earlier run must not leak into join
+        old.unlink()
     ink = np.array([20, 16, 14], np.uint8)
     parts, info = [], []
     for k in range(len(angles)):
@@ -160,6 +188,9 @@ def cmd_split(a):
             im[sector != k] = 0
         err = np.abs(over_white(flat) - rgb.astype(np.float32)).max()
         print("max deviation over white without slit: %.2f / 255" % err)
+        real = over_white([np.array(Image.open(out / ("part_%d.png" % k)).convert("RGBA")) for k in range(len(parts))])
+        real_err = np.abs(real - rgb.astype(np.float32)).max()
+        print("saved files joined over white:        %.2f / 255 (with --gap %.1f --edge %.1f the slit is visible on purpose; 0 slit = exact)" % (real_err, a.gap, a.edge))
 
 
 # ----------------------------------------------------------------------------- key
@@ -208,7 +239,13 @@ def cmd_key(a):
 # ----------------------------------------------------------------------------- join / compare
 def cmd_join(a):
     """Put parts back together (over white or a colour) - the way to 'rebuild' a picture from its exact pieces."""
-    files = sorted(Path(a.parts).glob("part_*.png"))
+    manifest = Path(a.parts) / "parts.json"
+    if manifest.exists():                                     # the manifest says which parts belong together
+        n = len(json.loads(manifest.read_text())["parts"])
+        files = [Path(a.parts) / ("part_%d.png" % k) for k in range(n)]
+        files = [f for f in files if f.exists()]
+    else:
+        files = sorted(Path(a.parts).glob("part_*.png"))
     if not files:
         sys.exit("no part_*.png in %s" % a.parts)
     ims = [np.array(Image.open(f).convert("RGBA")) for f in files]
@@ -223,12 +260,16 @@ def measure(x, y):
     gx = cv2.cvtColor(x, cv2.COLOR_RGB2GRAY)
     gy = cv2.cvtColor(y, cv2.COLOR_RGB2GRAY)
     d = np.abs(x.astype(np.float32) - y.astype(np.float32))
-    return structural_similarity(gx, gy), float(d.mean()), float(d.max())
+    win = min(7, min(gx.shape) // 2 * 2 - 1 if min(gx.shape) % 2 == 0 else min(gx.shape))
+    ss = structural_similarity(gx, gy, win_size=win) if win >= 3 else float("nan")   # tiny images: no SSIM window
+    return ss, float(d.mean()), float(d.max())
 
 
 def cmd_compare(a):
     x, y = load_rgb(a.first), load_rgb(a.second)
     if x.shape != y.shape:
+        if not a.resize:
+            sys.exit("the images have different sizes (%dx%d vs %dx%d) - use --resize to scale the second one" % (x.shape[1], x.shape[0], y.shape[1], y.shape[0]))
         y = cv2.resize(y, (x.shape[1], x.shape[0]), interpolation=cv2.INTER_AREA)
     ss, mean, mx = measure(x, y)
     print("SSIM %.4f   mean |diff| %.3f   max |diff| %d" % (ss, mean, mx))
@@ -373,6 +414,7 @@ def main(argv=None):
 
     s = sub.add_parser("compare", help="SSIM and pixel difference of two images")
     s.add_argument("first"); s.add_argument("second")
+    s.add_argument("--resize", action="store_true", help="scale the second image to the size of the first (otherwise different sizes are an error)")
     s.set_defaults(fn=cmd_compare)
 
     s = sub.add_parser("trace", help="redraw as SVG (vtracer): approximate")
@@ -388,7 +430,12 @@ def main(argv=None):
     s.set_defaults(fn=cmd_upscale)
 
     a = p.parse_args(argv)
-    a.fn(a)
+    try:
+        a.fn(a)
+    except (FileNotFoundError, ValueError, ZeroDivisionError, OSError) as e:
+        if os.environ.get("PIXELCUT_DEBUG"):
+            raise
+        sys.exit("error: %s (set PIXELCUT_DEBUG=1 for the full trace)" % e)
 
 
 if __name__ == "__main__":
