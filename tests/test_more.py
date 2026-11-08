@@ -290,7 +290,7 @@ def test_animated_gif_is_announced(tmp_path):
 
 
 # --------------------------------------------------------------------------- the download guard
-def test_download_checksum_and_zip_slip(tmp_path, monkeypatch):
+def test_download_checksum_and_zip_slip(tmp_path, monkeypatch, capsys):
     import hashlib
     import platform
     import shutil
@@ -301,20 +301,53 @@ def test_download_checksum_and_zip_slip(tmp_path, monkeypatch):
     monkeypatch.setattr(Path, "home", classmethod(lambda cls: tmp_path))
     monkeypatch.setattr(shutil, "which", lambda *a, **k: None)
     monkeypatch.setattr(platform, "machine", lambda: "x86_64")
+    monkeypatch.setattr(sys, "platform", "linux")
     cache = tmp_path / ".cache" / "pixelcut" / "realesrgan"
 
-    monkeypatch.setattr(urllib.request, "urlretrieve", lambda url, dest: Path(dest).write_bytes(b"not the real release"))
-    assert pixelcut.ensure_esrgan() is None                       # wrong checksum: nothing is extracted or run
+    def good_zip(url, dest, extra=()):
+        with zipfile.ZipFile(dest, "w") as z:
+            z.writestr("pkg/realesrgan-ncnn-vulkan", "#!/bin/sh")
+            for name in extra:
+                z.writestr(name, "x")
+
+    # 1. a perfectly valid archive with the WRONG checksum must be rejected before anything is extracted
+    monkeypatch.setattr(urllib.request, "urlretrieve", lambda url, dest: good_zip(url, dest))
+    assert pixelcut.ensure_esrgan() is None
+    assert "checksum does not match" in capsys.readouterr().out
     assert not list(cache.rglob("realesrgan-ncnn-vulkan*"))
 
-    def evil(url, dest):
-        with zipfile.ZipFile(dest, "w") as z:
-            z.writestr("../evil.txt", "x")
-    monkeypatch.setattr(urllib.request, "urlretrieve", evil)
-
+    # 2. right checksum, but the archive tries to leave the folder -> refused, nothing extracted
     class AnyHash(dict):
         def __getitem__(self, key):
             return hashlib.sha256((cache / "release.zip").read_bytes()).hexdigest()
     monkeypatch.setattr(pixelcut, "ESRGAN_SHA256", AnyHash())
-    assert pixelcut.ensure_esrgan() is None                       # checksum fits, but the archive tries to leave the folder
-    assert not (tmp_path / ".cache" / "pixelcut" / "evil.txt").exists()
+    monkeypatch.setattr(urllib.request, "urlretrieve", lambda url, dest: good_zip(url, dest, ("../evil.txt",)))
+    assert pixelcut.ensure_esrgan() is None
+    assert "unsafe path" in capsys.readouterr().out
+    assert not list(cache.rglob("realesrgan-ncnn-vulkan*"))
+
+    # 3. the same archive without the bad member works - so the refusal above was really about the path
+    monkeypatch.setattr(urllib.request, "urlretrieve", lambda url, dest: good_zip(url, dest))
+    assert pixelcut.ensure_esrgan() is not None
+
+
+@pytest.mark.parametrize("angles", ["0,20,200", "10,25,40,190"])
+def test_zigzag_does_not_disturb_close_lines(tmp_path, angles):
+    out = tmp_path / "z"
+    depth = 8
+    cli("split", EX / "photo_cat.png", out, "--opaque", "--angles=" + angles, "--depth", str(depth), "--tooth", "40", "--gap", "0", "--edge", "0", "--centre", "200,150")
+    vals = [float(v) for v in angles.split(",")]
+    got, count = owners(out, len(vals))
+    assert count.min() == 1 and count.max() == 1
+    want, _ = expected_owner(got.shape, (200, 150), vals)
+    h, w = got.shape
+    yy, xx = np.mgrid[0:h, 0:w]
+    r = np.hypot(xx - 200, yy - 150)
+    ang = (np.degrees(np.arctan2(yy - 150, xx - 200)) + 360) % 360
+    ray = []                                                      # distance of every pixel to every line (a ray, not an endless line)
+    for s in vals:
+        d = np.abs(((ang - s) + 180) % 360 - 180)
+        ray.append(np.where(d < 90, r * np.sin(np.radians(d)), r))
+    far = np.min(ray, axis=0) > depth + 3
+    assert far.sum() > 1000
+    assert (got[far] != want[far]).sum() == 0
