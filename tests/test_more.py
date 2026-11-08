@@ -368,3 +368,25 @@ def test_join_refuses_duplicate_part_names(tmp_path):
     m["files"] = ["part_0.png"] * 4
     (out / "parts.json").write_text(json.dumps(m))
     assert "damaged" in fails("join", out, tmp_path / "j.png")
+
+
+def test_split_rolls_back_when_the_swap_is_interrupted(tmp_path, monkeypatch):
+    import os
+    import pixelcut
+    out = tmp_path / "r"
+    cli("split", EX / "photo_cat.png", out, "--opaque", "--angles", "0,180", "--gap", "0", "--edge", "0")
+    before = {f.name: f.read_bytes() for f in out.iterdir()}
+    real, calls = os.replace, {"n": 0}
+
+    def flaky(a, b):
+        if Path(a).parent.name == ".pixelcut_new":
+            calls["n"] += 1
+            if calls["n"] == 2:
+                raise OSError("disk went away")
+        return real(a, b)
+    monkeypatch.setattr(os, "replace", flaky)
+    monkeypatch.setattr(sys, "argv", ["pixelcut", "split", str(EX / "photo_cat.png"), str(out), "--opaque", "--angles", "0,90,180", "--gap", "0", "--edge", "0"])
+    with pytest.raises(SystemExit):
+        pixelcut.main()
+    after = {f.name: f.read_bytes() for f in out.iterdir()}
+    assert after == before                                         # old set intact, no staging/backup left over

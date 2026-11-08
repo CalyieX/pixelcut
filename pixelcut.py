@@ -256,11 +256,28 @@ def cmd_split(a):
                      "fattest_point": fattest_point(solid)})
     files = ["part_%d.png" % k for k in range(len(parts))]
     (staging / "parts.json").write_text(json.dumps({"size": [w, h], "centre": list(centre), "files": files, "parts": info}, indent=1))
-    for name in ours:                                         # all parts exist - now swap old for new
-        if (out / name).is_file():
-            (out / name).unlink()
-    for name in files + ["parts.json"]:
-        os.replace(staging / name, out / name)
+    backup = out / ".pixelcut_old"                            # old files are moved aside, not deleted - an abort rolls back
+    if backup.exists():
+        shutil.rmtree(backup)
+    backup.mkdir()
+    moved = []
+    try:
+        for name in sorted(ours | {"parts.json"}):
+            if (out / name).is_file():
+                os.replace(out / name, backup / name)
+                moved.append(name)
+        for name in files + ["parts.json"]:
+            os.replace(staging / name, out / name)
+    except BaseException:
+        for name in files + ["parts.json"]:                   # take back anything already swapped in, restore the old set
+            if (out / name).is_file() and name not in moved:
+                (out / name).unlink()
+        for name in moved:
+            os.replace(backup / name, out / name)
+        shutil.rmtree(backup, ignore_errors=True)
+        shutil.rmtree(staging, ignore_errors=True)
+        raise
+    shutil.rmtree(backup)
     shutil.rmtree(staging)
     print("wrote %d parts + parts.json to %s" % (len(parts), out))
     if a.verify:
