@@ -282,7 +282,10 @@ def ensure_esrgan():
     found = shutil.which("realesrgan-ncnn-vulkan")
     if found:
         return found
+    import platform
     osname = {"win32": "windows", "darwin": "macos"}.get(sys.platform, "ubuntu")
+    if platform.machine().lower() not in ("amd64", "x86_64") and osname != "macos":
+        sys.exit("The official Real-ESRGAN release only exists for x86-64 (this machine: %s). Install a build for it and pass --bin PATH." % platform.machine())
     exename = "realesrgan-ncnn-vulkan" + (".exe" if osname == "windows" else "")
     cache = Path.home() / ".cache" / "pixelcut" / "realesrgan"
     exe = next(cache.rglob(exename), None) if cache.exists() else None
@@ -307,7 +310,12 @@ def cmd_upscale(a):
     """AI upscale with Real-ESRGAN (realesrgan-ncnn-vulkan). New pixels are invented: sharper, but not exact any more."""
     import subprocess
     exe = a.bin or ensure_esrgan()
-    subprocess.run([exe, "-i", str(Path(a.input).resolve()), "-o", str(Path(a.output).resolve()), "-n", a.model, "-s", str(a.scale)], check=True, cwd=str(Path(exe).parent))
+    try:
+        subprocess.run([exe, "-i", str(Path(a.input).resolve()), "-o", str(Path(a.output).resolve()), "-n", a.model, "-s", str(a.scale)], check=True, cwd=str(Path(exe).parent))
+    except OSError as e:
+        sys.exit("could not start %s (%s). Wrong CPU architecture? Pass a matching build with --bin PATH." % (exe, e))
+    except subprocess.CalledProcessError as e:
+        sys.exit("Real-ESRGAN failed (exit %s). It needs a Vulkan-capable GPU/driver." % e.returncode)
     print("wrote", a.output)
 
 
