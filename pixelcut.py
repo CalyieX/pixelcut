@@ -19,6 +19,8 @@ Run `python pixelcut.py COMMAND -h` for the options.
 import argparse
 import json
 import os
+import re
+import shutil
 import sys
 from pathlib import Path
 
@@ -27,15 +29,27 @@ import numpy as np
 from PIL import Image
 
 
+PART_NAME = re.compile(r"part_\d+\.png")
+
+
 # ----------------------------------------------------------------------------- helpers
 def load_rgb(path):
     """8-bit RGB. Transparency is composited over white and 16-bit data is scaled to 8 bit - both with a notice, never silently."""
     im = Image.open(path)
-    deep = cv2.imdecode(np.fromfile(str(path), np.uint8), cv2.IMREAD_UNCHANGED)       # Pillow cuts 48-bit RGB silently
+    if im.width * im.height > 150_000_000:
+        sys.exit("image too large (%d x %d = %d MP, limit 150 MP)" % (im.width, im.height, im.width * im.height // 1_000_000))
+    if getattr(im, "n_frames", 1) > 1:
+        print("note: %s has %d frames - only the first one is used" % (path, im.n_frames), file=sys.stderr)
+    deep = None
+    if Path(path).suffix.lower() in (".png", ".tif", ".tiff"):                            # Pillow cuts 48/64-bit PNG silently
+        deep = cv2.imdecode(np.fromfile(str(path), np.uint8), cv2.IMREAD_UNCHANGED)
     if deep is not None and deep.dtype == np.uint16 and deep.ndim == 3:
         print("note: %s is 16 bit per channel - scaled to 8 bit, so the result is not exact for the full range" % path, file=sys.stderr)
-        deep = deep[:, :, :3][:, :, ::-1] if deep.shape[2] >= 3 else np.dstack([deep[:, :, 0]] * 3)
-        return np.clip(deep.astype(np.float64) / 257.0 + 0.5, 0, 255).astype(np.uint8)
+        rgb16 = deep[:, :, :3][:, :, ::-1].astype(np.float64) if deep.shape[2] >= 3 else np.dstack([deep[:, :, 0]] * 3).astype(np.float64)
+        if deep.shape[2] == 4:                                                              # transparency over white, as for 8 bit
+            al = deep[:, :, 3:4].astype(np.float64) / 65535.0
+            rgb16 = rgb16 * al + 65535.0 * (1 - al)
+        return np.clip(rgb16 / 257.0 + 0.5, 0, 255).astype(np.uint8)
     if im.mode == "CMYK":
         print("note: %s is CMYK - converted to RGB, colours are not exact" % path, file=sys.stderr)
     if im.mode in ("I;16", "I;16L", "I;16B", "I", "F"):
@@ -150,8 +164,9 @@ def split_sectors(shape, centre, angles, tooth, depth, gap, edge, region=None):
         d = np.radians(((ang - bang + 180) % 360) - 180)
         along, perp = r * np.cos(d), r * np.sin(d)
         zig = depth * tri(along / tooth + .25 * k) if depth > 0 else 0.0
-        near = (np.abs(np.degrees(d)) < 35) & (along > 0)
-        sector = np.where(near, np.where(perp > zig, k, (k - 1) % n), sector)
+        near = (np.abs(perp) <= depth + gap / 2 + edge + 2) & (along > 0)      # a narrow band along the line, never a wide wedge
+        if depth > 0:                                                          # straight lines: membership by angle is already exact
+            sector = np.where(near, np.where(perp > zig, k, (k - 1) % n), sector)
         slit_dist = np.where(near, np.minimum(slit_dist, np.abs(perp - zig)), slit_dist)
     limit = region if region is not None else np.ones((h, w), bool)
     slit = (slit_dist < gap / 2) & limit
@@ -181,10 +196,16 @@ def cmd_split(a):
     try:
         angles = [float(v) for v in a.angles.split(",")]
         finite(angles, "--angles")
+        angles = [v % 360.0 for v in angles]                  # 360 means 0, -90 means 270
     except ValueError:
         sys.exit("--angles must be numbers separated by commas, e.g. 32,148,214,327")
     if len(angles) < 2 or len({round(v % 360, 6) for v in angles}) != len(angles):
         sys.exit("--angles needs at least two different angles")
+    for flag, value in (("--gap", a.gap), ("--edge", a.edge), ("--depth", a.depth), ("--tooth", a.tooth)):
+        if not np.isfinite(value) or value < 0:
+            sys.exit("%s must be a finite number, 0 or greater" % flag)
+    if a.gap > 100 or a.edge > 100 or a.depth > 1000:
+        sys.exit("--gap/--edge/--depth are in pixels; these values are far too large")
     if a.depth > 0 and a.tooth <= 0:
         sys.exit("--tooth must be greater than 0 (or use --depth 0 for straight lines)")
     region = None
@@ -203,14 +224,21 @@ def cmd_split(a):
             sector[cc] = np.bincount(sector[cc].ravel()).argmax()
     out = Path(a.outdir)
     out.mkdir(parents=True, exist_ok=True)
-    old_manifest = out / "parts.json"                        # only files that an earlier pixelcut run listed are replaced
+    old_manifest = out / "parts.json"                        # only files that an earlier pixelcut run listed may be replaced
+    ours = set()
     if old_manifest.exists():
         try:
-            for name in json.loads(old_manifest.read_text()).get("files", []):
-                if Path(name).name == name and (out / name).is_file():
-                    (out / name).unlink()
-        except (ValueError, OSError):
-            pass
+            listed = json.loads(old_manifest.read_text()).get("files", [])
+            ours = {n for n in listed if isinstance(n, str) and PART_NAME.fullmatch(n)}
+        except Exception:                                    # damaged manifest: treat the folder as foreign
+            ours = set()
+    clash = [("part_%d.png" % k) for k in range(len(angles)) if (out / ("part_%d.png" % k)).exists() and ("part_%d.png" % k) not in ours]
+    if clash:
+        sys.exit("%s already exists in %s and was not written by pixelcut - use an empty folder" % (", ".join(clash), out))
+    staging = out / ".pixelcut_new"                           # everything is written here first, replacing happens only when all parts worked
+    if staging.exists():
+        shutil.rmtree(staging)
+    staging.mkdir()
     ink = np.array([20, 16, 14], np.uint8)
     parts, info = [], []
     for k in range(len(angles)):
@@ -221,13 +249,19 @@ def cmd_split(a):
             img[e, :3] = ink
             img[e, 3] = 255
         parts.append(img)
-        Image.fromarray(img, "RGBA").save(out / ("part_%d.png" % k))
+        Image.fromarray(img, "RGBA").save(staging / ("part_%d.png" % k))
         solid = ((sector == k) & ~slit & (rgba[:, :, 3] > 8)).astype(np.uint8)
         info.append({"part": k, "starts_at_angle": sorted(angles)[k],
                      "polygon": contour_polygon(solid, a.simplify), "polygons": contour_polygons(solid, a.simplify),
                      "fattest_point": fattest_point(solid)})
     files = ["part_%d.png" % k for k in range(len(parts))]
-    (out / "parts.json").write_text(json.dumps({"size": [w, h], "centre": list(centre), "files": files, "parts": info}, indent=1))
+    (staging / "parts.json").write_text(json.dumps({"size": [w, h], "centre": list(centre), "files": files, "parts": info}, indent=1))
+    for name in ours:                                         # all parts exist - now swap old for new
+        if (out / name).is_file():
+            (out / name).unlink()
+    for name in files + ["parts.json"]:
+        os.replace(staging / name, out / name)
+    shutil.rmtree(staging)
     print("wrote %d parts + parts.json to %s" % (len(parts), out))
     if a.verify:
         # without slit and edge the parts must add up to the original over white
@@ -251,8 +285,10 @@ def cmd_key(a):
         sys.exit("--box must look like x0,y0,x1,y1 (four whole numbers)")
     if not (0 <= x0 < x1 <= w and 0 <= y0 < y1 <= h):
         sys.exit("--box %s does not lie inside the image (%dx%d) or is empty/reversed" % (a.box, w, h))
-    if not 0 < a.scale <= 10:
+    if not (np.isfinite(a.scale) and 0 < a.scale <= 10):
         sys.exit("--scale must be greater than 0 and at most 10")
+    if a.close < 1 or a.close > 99 or not np.isfinite(a.threshold) or a.threshold < 0:
+        sys.exit("--close must be 1..99 and --threshold 0 or greater")
     roi = rgb[y0:y1, x0:x1].astype(np.float32)
     ring = np.concatenate([roi[:3].reshape(-1, 3), roi[-3:].reshape(-1, 3), roi[:, :3].reshape(-1, 3), roi[:, -3:].reshape(-1, 3)])
     fill = np.median(ring, 0)                                  # the flat colour the element sits on
@@ -309,14 +345,21 @@ def cmd_join(a):
             m = json.loads(manifest.read_text())
             n = len(m["parts"])
             size = tuple(m["size"])
-        except (ValueError, KeyError, TypeError):
-            sys.exit("parts.json is damaged (needs 'size' and 'parts')")
-        files = [Path(a.parts) / ("part_%d.png" % k) for k in range(n)]
+            assert len(size) == 2 and all(isinstance(v, int) and v > 0 for v in size) and n > 0
+            names = m.get("files") or ["part_%d.png" % k for k in range(n)]
+            assert len(names) == n and all(isinstance(x, str) and PART_NAME.fullmatch(x) for x in names)
+        except (ValueError, KeyError, TypeError, AssertionError, AttributeError):
+            sys.exit("parts.json is damaged (needs 'size' [w,h], 'parts' and matching 'files')")
+        files = [Path(a.parts) / x for x in names]
         missing = [f.name for f in files if not f.exists()]
         if missing:
             sys.exit("parts.json lists %d parts but these are missing: %s" % (n, ", ".join(missing)))
     else:
-        files = sorted(Path(a.parts).glob("part_*.png"))
+        files = sorted(f for f in Path(a.parts).glob("part_*.png") if PART_NAME.fullmatch(f.name))
+        numbers = sorted(int(f.stem.split("_")[1]) for f in files)
+        gaps = [k for k in range(numbers[-1] + 1) if k not in numbers] if numbers else []
+        if gaps:
+            sys.exit("part numbering has a gap (missing part_%d.png) - without parts.json every part is needed" % gaps[0])
     if not files:
         sys.exit("no part_*.png in %s" % a.parts)
     ims = [np.array(Image.open(f).convert("RGBA")) for f in files]
@@ -368,6 +411,10 @@ def cmd_trace(a):
     import vtracer
     if not Path(a.input).is_file():
         sys.exit("error: %s does not exist" % a.input)
+    if not (0 <= a.speckle <= 128 and 1 <= a.colors <= 8 and 0 <= a.layers <= 255):
+        sys.exit("--speckle must be 0..128, --colors 1..8, --layers 0..255")
+    if not Path(a.output).resolve().parent.is_dir():
+        sys.exit("error: the folder for %s does not exist" % a.output)
     vtracer.convert_image_to_svg_py(a.input, a.output, colormode="color", hierarchical="stacked", mode="spline",
                                     filter_speckle=a.speckle, color_precision=a.colors, layer_difference=a.layers,
                                     corner_threshold=60, length_threshold=3.5, splice_threshold=45, path_precision=3)
@@ -382,9 +429,14 @@ def cmd_trace(a):
         t = Path(tempfile.mkdtemp())
         (t / "p.html").write_text('<html><body style="margin:0;background:#fff"><img src="%s" width=%d height=%d></body></html>'
                                   % (Path(a.output).resolve().as_uri(), w, h))
+        render_target = Path(a.render).resolve()
+        if render_target.exists():
+            render_target.unlink()
         subprocess.run([chrome, "--headless=new", "--disable-gpu", "--hide-scrollbars", "--allow-file-access-from-files",
                         "--user-data-dir=" + str(t / "prof"), "--window-size=%d,%d" % (w, h), "--screenshot=" + str(Path(a.render).resolve()),
                         (t / "p.html").as_uri()], capture_output=True, timeout=120)
+        if not Path(a.render).exists():
+            sys.exit("error: Chrome did not produce %s" % a.render)
         print("rendered", a.render)
 
 
@@ -450,6 +502,8 @@ def cmd_upscale(a):
     """AI upscale with Real-ESRGAN (realesrgan-ncnn-vulkan). New pixels are invented: sharper, but not exact any more.
     Falls back to Lanczos where the engine cannot run (ARM, no Vulkan GPU)."""
     import subprocess
+    if not 1 <= a.scale <= 8:
+        sys.exit("--scale must be a whole number from 1 to 8")
     exe = a.bin or ensure_esrgan()
     if not exe:
         return lanczos_upscale(a, "no build for this machine")
@@ -520,10 +574,12 @@ def main(argv=None):
     a = p.parse_args(argv)
     try:
         a.fn(a)
-    except (FileNotFoundError, ValueError, ZeroDivisionError, OSError, KeyError, cv2.error) as e:
+    except (SystemExit, KeyboardInterrupt):
+        raise
+    except BaseException as e:                                # includes pyo3 PanicException, which is not an Exception
         if os.environ.get("PIXELCUT_DEBUG"):
             raise
-        sys.exit("error: %s (set PIXELCUT_DEBUG=1 for the full trace)" % e)
+        sys.exit("error: %s (set PIXELCUT_DEBUG=1 for the full trace)" % (str(e).strip().splitlines() or [type(e).__name__])[0])
 
 
 if __name__ == "__main__":
