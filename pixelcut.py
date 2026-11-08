@@ -275,17 +275,18 @@ ESRGAN_URL = "https://github.com/xinntao/Real-ESRGAN/releases/download/v0.2.5.0/
 
 
 def ensure_esrgan():
-    """Find realesrgan-ncnn-vulkan; if it is missing, download the official release once into ~/.cache/pixelcut."""
+    """Find realesrgan-ncnn-vulkan; if it is missing, download the official release once into ~/.cache/pixelcut.
+    Returns None when this machine cannot run it (e.g. ARM Linux)."""
+    import platform
     import shutil
     import urllib.request
     import zipfile
     found = shutil.which("realesrgan-ncnn-vulkan")
     if found:
         return found
-    import platform
     osname = {"win32": "windows", "darwin": "macos"}.get(sys.platform, "ubuntu")
     if platform.machine().lower() not in ("amd64", "x86_64") and osname != "macos":
-        sys.exit("The official Real-ESRGAN release only exists for x86-64 (this machine: %s). Install a build for it and pass --bin PATH." % platform.machine())
+        return None
     exename = "realesrgan-ncnn-vulkan" + (".exe" if osname == "windows" else "")
     cache = Path.home() / ".cache" / "pixelcut" / "realesrgan"
     exe = next(cache.rglob(exename), None) if cache.exists() else None
@@ -294,28 +295,42 @@ def ensure_esrgan():
     cache.mkdir(parents=True, exist_ok=True)
     zpath = cache / "release.zip"
     print("realesrgan-ncnn-vulkan not found - downloading the official release (~50 MB, once) ...")
-    urllib.request.urlretrieve(ESRGAN_URL % osname, zpath)
-    with zipfile.ZipFile(zpath) as z:
-        z.extractall(cache)
-    zpath.unlink()
+    try:
+        urllib.request.urlretrieve(ESRGAN_URL % osname, zpath)
+        with zipfile.ZipFile(zpath) as z:
+            z.extractall(cache)
+        zpath.unlink()
+    except Exception as e:
+        print("download failed (%s)" % e)
+        return None
     exe = next(cache.rglob(exename), None)
-    if not exe:
-        sys.exit("download worked but %s was not found in the archive" % exename)
-    if osname != "windows":
+    if exe and osname != "windows":
         exe.chmod(0o755)
-    return str(exe)
+    return str(exe) if exe else None
+
+
+def lanczos_upscale(a, why):
+    """Fallback without AI: plain Lanczos resize. Smooth, but no invented detail."""
+    print("Real-ESRGAN not usable here (%s) - using plain Lanczos resize instead (no AI detail)." % why)
+    im = Image.open(a.input).convert("RGB")
+    im.resize((im.width * a.scale, im.height * a.scale), Image.LANCZOS).save(a.output)
+    print("wrote", a.output)
 
 
 def cmd_upscale(a):
-    """AI upscale with Real-ESRGAN (realesrgan-ncnn-vulkan). New pixels are invented: sharper, but not exact any more."""
+    """AI upscale with Real-ESRGAN (realesrgan-ncnn-vulkan). New pixels are invented: sharper, but not exact any more.
+    Falls back to Lanczos where the engine cannot run (ARM, no Vulkan GPU)."""
     import subprocess
     exe = a.bin or ensure_esrgan()
+    if not exe:
+        return lanczos_upscale(a, "no build for this machine")
     try:
-        subprocess.run([exe, "-i", str(Path(a.input).resolve()), "-o", str(Path(a.output).resolve()), "-n", a.model, "-s", str(a.scale)], check=True, cwd=str(Path(exe).parent))
+        subprocess.run([exe, "-i", str(Path(a.input).resolve()), "-o", str(Path(a.output).resolve()), "-n", a.model, "-s", str(a.scale)],
+                       check=True, cwd=str(Path(exe).parent), capture_output=True)
     except OSError as e:
-        sys.exit("could not start %s (%s). Wrong CPU architecture? Pass a matching build with --bin PATH." % (exe, e))
-    except subprocess.CalledProcessError as e:
-        sys.exit("Real-ESRGAN failed (exit %s). It needs a Vulkan-capable GPU/driver." % e.returncode)
+        return lanczos_upscale(a, "cannot start: %s" % e)
+    except subprocess.CalledProcessError:
+        return lanczos_upscale(a, "needs a Vulkan GPU/driver")
     print("wrote", a.output)
 
 
