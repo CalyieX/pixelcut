@@ -423,3 +423,41 @@ def test_upscale_no_ai_works_offline(tmp_path):
 def test_trace_render_never_overwrites_input(tmp_path):
     Image.new("RGB", (20, 20), "black").save(tmp_path / "x.png")
     assert "different file" in fails("trace", tmp_path / "x.png", tmp_path / "x.svg", "--render", tmp_path / "x.png")
+
+
+def test_rollback_after_a_failed_backup_step_keeps_unmoved_originals(tmp_path, monkeypatch):
+    import os
+    import pixelcut
+    out = tmp_path / "b"
+    cli("split", EX / "photo_cat.png", out, "--opaque", "--angles", "0,90,180", "--gap", "0", "--edge", "0")
+    before = {f.name: f.read_bytes() for f in out.iterdir()}
+    real, calls = os.replace, {"n": 0}
+
+    def flaky(a, b):
+        if Path(b).parent.name == ".pixelcut_old":             # the SECOND backup move fails: one original is still in place
+            calls["n"] += 1
+            if calls["n"] == 2:
+                raise OSError("disk went away")
+        return real(a, b)
+    monkeypatch.setattr(os, "replace", flaky)
+    monkeypatch.setattr(sys, "argv", ["pixelcut", "split", str(EX / "photo_cat.png"), str(out), "--opaque", "--angles", "0,90,180", "--gap", "0", "--edge", "0"])
+    with pytest.raises(SystemExit):
+        pixelcut.main()
+    assert {f.name: f.read_bytes() for f in out.iterdir()} == before
+
+
+def test_recovery_leaves_foreign_files_alone(tmp_path):
+    out = tmp_path / "f"
+    out.mkdir()
+    (out / "notes.txt").write_text("mine")
+    old = out / ".pixelcut_old"
+    old.mkdir()
+    (old / "notes.txt").write_text("not pixelcut's")
+    assert "did not put there" in fails("split", EX / "photo_cat.png", out, "--opaque", "--angles", "0,180")
+    assert (out / "notes.txt").read_text() == "mine" and (old / "notes.txt").exists()
+
+
+def test_only_inside_on_a_blank_image(tmp_path):
+    Image.new("RGB", (40, 30), (255, 255, 255)).save(tmp_path / "w.png")
+    cli("split", tmp_path / "w.png", tmp_path / "o", "--opaque", "--only-inside", "--angles", "0,180", "--gap", "0", "--edge", "0")
+    assert (tmp_path / "o" / "parts.json").exists()

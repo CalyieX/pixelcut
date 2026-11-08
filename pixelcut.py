@@ -178,7 +178,7 @@ def cmd_split(a):
     rgb = load_rgb(a.input)
     h, w = rgb.shape[:2]
     rgba = np.dstack([rgb, np.full(rgb.shape[:2], 255, np.uint8)]) if a.opaque else color_to_alpha(rgb)
-    if not a.opaque and (rgb.min(2) < 250).sum() == 0:
+    if rgba[:, :, 3].max() <= 8:                              # same threshold the parts and polygons use: nothing visible would be cut
         sys.exit("the image is completely white - nothing to cut (use --opaque to cut it anyway)")
     if a.centre == "auto":                                    # centroid of everything that is not white
         m = (rgb.min(2) < 250).astype(np.uint8)
@@ -213,8 +213,9 @@ def cmd_split(a):
         m = (rgb.min(2) < 250).astype(np.uint8)
         m = cv2.morphologyEx(m, cv2.MORPH_CLOSE, np.ones((7, 7), np.uint8))
         n, lab, st, _ = cv2.connectedComponentsWithStats(m)
-        big = 1 + int(np.argmax(st[1:, cv2.CC_STAT_AREA]))
-        region = cv2.dilate((lab == big).astype(np.uint8), np.ones((5, 5), np.uint8)) > 0
+        if n > 1:                                             # an all-background image has no blob: cut the whole picture
+            big = 1 + int(np.argmax(st[1:, cv2.CC_STAT_AREA]))
+            region = cv2.dilate((lab == big).astype(np.uint8), np.ones((5, 5), np.uint8)) > 0
     sector, slit, edge_zone, order = split_sectors((h, w), centre, angles, a.tooth, a.depth, a.gap, a.edge, region)
     if region is not None:                                    # satellites stay whole: one sector per connected area outside the main blob
         content = cv2.morphologyEx((rgb.min(2) < 250).astype(np.uint8), cv2.MORPH_CLOSE, np.ones((7, 7), np.uint8))
@@ -226,7 +227,10 @@ def cmd_split(a):
     out.mkdir(parents=True, exist_ok=True)
     leftover = out / ".pixelcut_old"                          # an earlier run was interrupted while swapping: its old set is the only full copy
     if leftover.is_dir():
-        for f in leftover.iterdir():
+        strange = [f.name for f in leftover.iterdir() if not (PART_NAME.fullmatch(f.name) or f.name == "parts.json")]
+        if strange:
+            sys.exit("%s holds files pixelcut did not put there (%s) - check and remove it first" % (leftover, ", ".join(strange)))
+        for f in leftover.iterdir():                          # only pixelcut's own names are ever restored
             os.replace(f, out / f.name)
         shutil.rmtree(leftover)
         print("note: an interrupted earlier run was rolled back first (previous parts restored)", file=sys.stderr)
@@ -266,7 +270,7 @@ def cmd_split(a):
     (staging / "parts.json").write_text(json.dumps({"size": [w, h], "centre": list(centre), "files": files, "parts": info}, indent=1))
     backup = out / ".pixelcut_old"                            # old files are moved aside, not deleted - an abort rolls back
     backup.mkdir()                                            # (a leftover one was restored above, so this is always new)
-    moved = []
+    moved, installed = [], []
     try:
         for name in sorted(ours | {"parts.json"}):
             if (out / name).is_file():
@@ -274,10 +278,10 @@ def cmd_split(a):
                 moved.append(name)
         for name in files + ["parts.json"]:
             os.replace(staging / name, out / name)
+            installed.append(name)
     except BaseException:
-        for name in files + ["parts.json"]:                   # take back anything already swapped in, restore the old set
-            if (out / name).is_file() and name not in moved:
-                (out / name).unlink()
+        for name in installed:                                # take back exactly what this run put in place, then restore the old set
+            (out / name).unlink()
         for name in moved:
             os.replace(backup / name, out / name)
         shutil.rmtree(backup, ignore_errors=True)
@@ -452,16 +456,20 @@ def cmd_trace(a):
         if not chrome:
             sys.exit("--render needs Chrome/Edge/Brave")
         w, h = Image.open(a.input).size
-        t = Path(tempfile.mkdtemp())
+        tmp = tempfile.TemporaryDirectory()
+        t = Path(tmp.name)
         (t / "p.html").write_text('<html><body style="margin:0;background:#fff"><img src="%s" width=%d height=%d></body></html>'
                                   % (Path(a.output).resolve().as_uri(), w, h))
         shot = t / "shot.png"                                 # render aside, replace the target only when it worked
-        subprocess.run([chrome, "--headless=new", "--disable-gpu", "--hide-scrollbars", "--allow-file-access-from-files",
-                        "--user-data-dir=" + str(t / "prof"), "--window-size=%d,%d" % (w, h), "--screenshot=" + str(shot),
-                        (t / "p.html").as_uri()], capture_output=True, timeout=120)
-        if not shot.exists():
-            sys.exit("error: Chrome did not produce a picture - %s was left as it was" % a.render)
-        shutil.move(str(shot), str(render_target))
+        try:
+            subprocess.run([chrome, "--headless=new", "--disable-gpu", "--hide-scrollbars", "--allow-file-access-from-files",
+                            "--user-data-dir=" + str(t / "prof"), "--window-size=%d,%d" % (w, h), "--screenshot=" + str(shot),
+                            (t / "p.html").as_uri()], capture_output=True, timeout=120)
+            if not shot.exists():
+                sys.exit("error: Chrome did not produce a picture - %s was left as it was" % a.render)
+            shutil.move(str(shot), str(render_target))
+        finally:
+            shutil.rmtree(tmp.name, ignore_errors=True)       # browser profile included
         print("rendered", a.render)
 
 
