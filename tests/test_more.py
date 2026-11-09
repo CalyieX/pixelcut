@@ -726,3 +726,8 @@ def test_key_interrupt_during_publish_restores_the_old_set(tmp_path, monkeypatch
     monkeypatch.undo()
     assert st["n"] >= 2
     assert {f.name: f.read_bytes() for f in out.iterdir()} == before
+
+
+def test_web_copy_is_the_same_file():
+    root = Path(__file__).parent.parent
+    assert (root / "docs" / "pixelcut.py").read_bytes() == (root / "pixelcut.py").read_bytes(), "run: copy pixelcut.py docs\pixelcut.py"

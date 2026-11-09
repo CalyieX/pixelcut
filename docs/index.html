@@ -1,0 +1,192 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>K&amp;K pixelcut</title>
+<meta name="description" content="Cut a picture into parts without changing a single pixel. Runs entirely in your browser - nothing is uploaded.">
+<style>
+  :root { --bg:#f6f6f4; --fg:#1b1b1a; --muted:#6b6b66; --card:#fff; --line:#dcdcd6; --accent:#2a5bd7; --ok:#1c7a3d; --bad:#b3261e; }
+  @media (prefers-color-scheme: dark) { :root { --bg:#161615; --fg:#ececea; --muted:#9a9a94; --card:#20201f; --line:#34342f; --accent:#7ba3ff; --ok:#6fcf97; --bad:#ff8a80; } }
+  * { box-sizing: border-box; }
+  body { margin:0; background:var(--bg); color:var(--fg); font:16px/1.45 -apple-system, system-ui, "Segoe UI", sans-serif;
+         padding: max(16px, env(safe-area-inset-top)) 16px max(24px, env(safe-area-inset-bottom)); }
+  main { max-width: 720px; margin: 0 auto; }
+  h1 { font-size: 1.5rem; margin: .2em 0 .1em; }
+  p.lead { color: var(--muted); margin: 0 0 1em; }
+  .card { background: var(--card); border: 1px solid var(--line); border-radius: 12px; padding: 14px; margin: 12px 0; }
+  label { display:block; font-size:.85rem; color:var(--muted); margin: 10px 0 4px; }
+  input[type=text], input[type=number], select { width:100%; font:inherit; padding:10px; border:1px solid var(--line); border-radius:8px; background:var(--bg); color:var(--fg); }
+  input[type=file] { width:100%; font:inherit; }
+  .row { display:grid; grid-template-columns: 1fr 1fr; gap: 10px; }
+  button { font:inherit; font-weight:600; padding:12px 16px; border-radius:10px; border:0; background:var(--accent); color:#fff; width:100%; margin-top:14px; min-height:44px; }
+  button[disabled] { opacity:.5; }
+  .check { display:flex; gap:8px; align-items:center; margin-top:12px; font-size:.95rem; color:var(--fg); }
+  .check input { width:20px; height:20px; }
+  #status { white-space: pre-wrap; font: .85rem/1.4 ui-monospace, Menlo, monospace; color: var(--muted); }
+  #status.ok { color: var(--ok); } #status.bad { color: var(--bad); }
+  #results img { max-width:100%; border:1px solid var(--line); border-radius:8px; background:
+      conic-gradient(#ddd 25%, #fff 0 50%, #ddd 0 75%, #fff 0) 0 0/16px 16px; margin: 6px 0; }
+  a.dl { display:block; text-align:center; padding:12px; margin:8px 0; border:1px solid var(--accent); border-radius:10px; color:var(--accent); text-decoration:none; font-weight:600; min-height:44px; }
+  small { color: var(--muted); }
+  [hidden] { display:none !important; }
+</style>
+</head>
+<body>
+<main>
+  <h1>K&amp;K pixelcut</h1>
+  <p class="lead">Cut a picture into parts without changing a single pixel. Everything runs on this device &ndash; your picture is never uploaded.</p>
+
+  <div class="card">
+    <label for="cmd">What do you want to do?</label>
+    <select id="cmd">
+      <option value="split">Split into parts (zig-zag or straight cuts)</option>
+      <option value="alpha">White background &rarr; transparent</option>
+      <option value="join">Put parts back together</option>
+    </select>
+
+    <label for="files" id="fileLabel">Picture</label>
+    <input id="files" type="file" accept="image/*">
+
+    <div id="splitOpts">
+      <label for="angles">Angles of the cuts in degrees (0 = right, 90 = down)</label>
+      <input id="angles" type="text" value="45,135,225,315" inputmode="decimal" autocomplete="off">
+      <div class="row">
+        <div><label for="depth">Zig-zag depth px (0 = straight)</label><input id="depth" type="number" value="9" min="0" step="1"></div>
+        <div><label for="tooth">Zig-zag period px</label><input id="tooth" type="number" value="18" min="1" step="1"></div>
+      </div>
+      <div class="row">
+        <div><label for="gap">Slit px</label><input id="gap" type="number" value="0" min="0" step="0.1"></div>
+        <div><label for="edge">Ink edge px</label><input id="edge" type="number" value="0" min="0" step="0.1"></div>
+      </div>
+      <div class="check"><input id="opaque" type="checkbox" checked><label for="opaque" style="margin:0;color:inherit">Photo: keep every pixel opaque</label></div>
+      <small>With slit 0, ink edge 0 and a normal 8-bit picture, joining the parts gives back exactly the original.</small>
+    </div>
+
+    <button id="go" disabled>Loading engine&hellip;</button>
+  </div>
+
+  <div class="card"><div id="status">Starting&hellip;</div></div>
+  <div class="card" id="results" hidden></div>
+  <p><small>Open source (MIT): <a href="https://github.com/CalyieX/pixelcut">github.com/CalyieX/pixelcut</a> &middot; Support: <a href="https://ko-fi.com/kkwonderland">ko-fi.com/kkwonderland</a></small></p>
+</main>
+
+<script src="https://cdn.jsdelivr.net/pyodide/v0.27.7/full/pyodide.js"></script>
+<script>
+"use strict";
+const $ = (id) => document.getElementById(id);
+const status = (t, cls) => { $("status").textContent = t; $("status").className = cls || ""; };
+let py = null;
+
+async function boot() {
+  try {
+    status("Loading the engine (first time about 40 MB, then cached)…");
+    py = await loadPyodide();
+    await py.loadPackage(["numpy", "pillow", "opencv-python"]);
+    const src = await (await fetch("pixelcut.py", { cache: "no-cache" })).text();
+    py.FS.mkdirTree("/work");
+    py.FS.writeFile("/work/pixelcut.py", src);
+    await py.runPythonAsync(`
+import sys, io, os, json, zipfile, contextlib, importlib
+sys.path.insert(0, "/work")
+import pixelcut
+def run(argv):
+    buf = io.StringIO()
+    try:
+        with contextlib.redirect_stdout(buf), contextlib.redirect_stderr(buf):
+            pixelcut.main(argv)
+        return 0, buf.getvalue()
+    except SystemExit as e:
+        code = e.code
+        msg = buf.getvalue() + (str(code) if isinstance(code, str) else "")
+        return (0 if code in (None, 0) else 1), msg
+    except BaseException as e:
+        return 1, buf.getvalue() + "error: %s" % e
+def zip_dir(folder, target):
+    with zipfile.ZipFile(target, "w", zipfile.ZIP_STORED) as z:
+        for n in sorted(os.listdir(folder)):
+            if n.startswith("."): continue
+            z.write(os.path.join(folder, n), n)
+`);
+    $("go").disabled = false;
+    $("go").textContent = "Go";
+    status("Ready. Choose a picture.", "ok");
+  } catch (e) {
+    status("Could not start the engine: " + e + "\nThis page needs a modern browser (Safari 16+, Chrome, Firefox) and an internet connection the first time.", "bad");
+    $("go").textContent = "Engine unavailable";
+  }
+}
+
+function layout() {
+  const c = $("cmd").value;
+  $("splitOpts").hidden = c !== "split";
+  const f = $("files");
+  if (c === "join") { f.multiple = true; f.accept = "image/png,application/json,.json,.png"; $("fileLabel").textContent = "All parts (part_0.png, part_1.png, … and parts.json)"; }
+  else { f.multiple = false; f.accept = "image/*"; $("fileLabel").textContent = "Picture"; }
+  f.value = "";
+}
+$("cmd").addEventListener("change", layout);
+
+function clearResults() { const r = $("results"); r.hidden = true; r.replaceChildren(); }
+function addImage(name, bytes, type) {
+  const url = URL.createObjectURL(new Blob([bytes], { type }));
+  const img = new Image(); img.src = url; img.alt = name; $("results").appendChild(img);
+}
+function addDownload(name, bytes, type) {
+  const url = URL.createObjectURL(new Blob([bytes], { type }));
+  const a = document.createElement("a"); a.className = "dl"; a.href = url; a.download = name; a.textContent = "Save " + name;
+  $("results").appendChild(a);
+}
+function wipe() { for (const d of ["/work/in", "/work/out"]) { try { py.runPython(`import shutil,os; shutil.rmtree("${d}", ignore_errors=True)`); } catch (_) {} } }
+
+async function go() {
+  clearResults();
+  const cmd = $("cmd").value;
+  const files = Array.from($("files").files);
+  if (!files.length) { status("Choose a picture first.", "bad"); return; }
+  $("go").disabled = true; status("Working…");
+  await new Promise((r) => setTimeout(r, 30));   // let the browser paint
+  try {
+    wipe();
+    py.FS.mkdirTree("/work/in"); py.FS.mkdirTree("/work/out");
+    let argv, outName;
+    if (cmd === "join") {
+      for (const f of files) py.FS.writeFile("/work/in/" + f.name, new Uint8Array(await f.arrayBuffer()));
+      argv = ["join", "/work/in", "/work/out/joined.png"];
+    } else {
+      const f = files[0];
+      py.FS.writeFile("/work/in/input", new Uint8Array(await f.arrayBuffer()));
+      if (cmd === "alpha") argv = ["alpha", "/work/in/input", "/work/out/transparent.png", "--verify"];
+      else {
+        argv = ["split", "/work/in/input", "/work/out/parts", "--angles=" + $("angles").value.trim(),
+                "--depth", $("depth").value, "--tooth", $("tooth").value, "--gap", $("gap").value, "--edge", $("edge").value, "--verify"];
+        if ($("opaque").checked) argv.push("--opaque");
+      }
+    }
+    const res = py.globals.get("run")(py.toPy(argv)).toJs();
+    const code = res[0], text = String(res[1]).trim();
+    if (code !== 0) { status(text || "Something went wrong.", "bad"); return; }
+    status(text, "ok");
+    const R = $("results"); R.hidden = false;
+    if (cmd === "split") {
+      const names = py.FS.readdir("/work/out/parts").filter((n) => n.endsWith(".png")).sort();
+      for (const n of names) addImage(n, py.FS.readFile("/work/out/parts/" + n), "image/png");
+      py.runPython(`zip_dir("/work/out/parts", "/work/out/parts.zip")`);
+      addDownload("pixelcut-parts.zip", py.FS.readFile("/work/out/parts.zip"), "application/zip");
+    } else {
+      const n = cmd === "alpha" ? "transparent.png" : "joined.png";
+      const data = py.FS.readFile("/work/out/" + n);
+      addImage(n, data, "image/png"); addDownload(n, data, "image/png");
+    }
+  } catch (e) {
+    status("error: " + e, "bad");
+  } finally {
+    $("go").disabled = false;
+  }
+}
+$("go").addEventListener("click", go);
+layout();
+boot();
+</script>
+</body>
+</html>

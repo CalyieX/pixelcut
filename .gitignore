@@ -5,3 +5,4 @@ pixelcut.egg-info/
 build/
 dist/
 *.spec
+.claude/
