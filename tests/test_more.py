@@ -824,3 +824,26 @@ def test_exif_rotation_is_applied_with_a_notice(tmp_path):
     r = cli("alpha", tmp_path / "phone.jpg", tmp_path / "up.png")
     assert "EXIF orientation" in r.stderr
     assert Image.open(tmp_path / "up.png").size == (40, 100)
+
+
+def test_python_api_roundtrip_is_exact_and_quiet(tmp_path, capsys):
+    import pixelcut
+    src = EX / "photo_cat.png"
+    parts = tmp_path / "pp"
+    info = pixelcut.split(src, parts, opaque=True, angles=[0, 120, 240], gap=0, edge=0)
+    assert len(info["files"]) == 3 and info["size"]
+    out = pixelcut.join(parts, tmp_path / "back.png")
+    r = pixelcut.compare(src, out)
+    assert r["max_diff"] == 0 and r["ssim"] == 1.0
+    assert capsys.readouterr().out == ""                            # a library does not print
+
+
+def test_python_api_raises_instead_of_exiting(tmp_path):
+    import pixelcut
+    with pytest.raises(pixelcut.PixelcutError, match="angles"):
+        pixelcut.split(EX / "photo_cat.png", tmp_path / "x", angles="5")
+    with pytest.raises(pixelcut.PixelcutError, match="unrecognized"):
+        pixelcut.split(EX / "photo_cat.png", tmp_path / "a", nonsense=1)
+    with pytest.raises(pixelcut.PixelcutError, match="different sizes"):
+        Image.new("RGB", (5, 5)).save(tmp_path / "s.png")
+        pixelcut.compare(EX / "photo_cat.png", tmp_path / "s.png")

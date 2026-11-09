@@ -73,6 +73,18 @@ Getestet bei jedem Commit auf GitHub Actions: Windows, Linux (x64 und ARM) und m
 
 ---
 
+## Aus Python benutzen
+
+```python
+import pixelcut
+
+info = pixelcut.split("bild.png", "teile", angles=[0, 120, 240], gap=0, edge=0, opaque=True)
+pixelcut.join("teile", "zurueck.png")
+print(pixelcut.compare("bild.png", "zurueck.png"))   # {'ssim': 1.0, 'mean_diff': 0.0, 'max_diff': 0.0}
+```
+
+Funktionen: `alpha`, `split`, `join`, `key`, `compare`, `trace`, `upscale`. Optionen heißen wie die Kommandozeilen-Flags, Bindestriche als Unterstriche (`only_inside=True`). Dieselben Prüfungen und Standardwerte wie in der Kommandozeile, nichts wird gedruckt, Fehler werden zu `pixelcut.PixelcutError`.
+
 ## Was pixelcut kann
 
 ### 1. `alpha`: weißen Hintergrund transparent machen, exakt
@@ -150,7 +162,7 @@ Bitte vorher lesen, das spart Zeit.
 8. **Keine Animation, keine Videos, keine Vektorgrafik.** Nur Rastergrafik (PNG, JPEG usw.). Ausgabe ist PNG mit Alphakanal.
 9. **Bei Spalt und Tintenkante ist das Ergebnis nicht mehr bit-gleich.** Wer `--gap` und `--edge` benutzt, schneidet bewusst Pixel weg und malt eine Kante. Das ist ein Gestaltungswerkzeug. Exakt zusammensetzen geht mit `--gap 0 --edge 0`.
 10. **Kein Farbmanagement.** Es rechnet in sRGB-Werten, ICC-Profile werden ignoriert.
-11. **Keine Schnittstelle für Programme.** Nur die Kommandozeile (und die Python-Datei zum Einbinden), keine grafische Oberfläche.
+11. **Keine grafische Oberfläche.** Kommandozeile, Python-Schnittstelle und die Browser-Version.
 
 ---
 
@@ -200,7 +212,7 @@ pip install -e ".[test]"
 pytest -q
 ```
 
-145 Tests. Sie prüfen die gespeicherten Dateien: Rundlauf split + join ist exakt (Zeichnung, Foto, gerade und Zickzack), die Teile überlappen nicht, Polygone, Winkel, Mitte, Größe und dickster Punkt stimmen mit den Teilen überein, `compare`, `key` und `alpha` rechnen richtig, `join` verweigert fehlende oder falsch große Teile, `split` fasst fremde Dateien nicht an, und schlechte Eingaben ergeben eine klare Fehlerzeile. Eingebaute Fehler (Mutationen) werden gefangen.
+147 Tests. Sie prüfen die gespeicherten Dateien: Rundlauf split + join ist exakt (Zeichnung, Foto, gerade und Zickzack), die Teile überlappen nicht, Polygone, Winkel, Mitte, Größe und dickster Punkt stimmen mit den Teilen überein, `compare`, `key` und `alpha` rechnen richtig, `join` verweigert fehlende oder falsch große Teile, `split` fasst fremde Dateien nicht an, und schlechte Eingaben ergeben eine klare Fehlerzeile. Eingebaute Fehler (Mutationen) werden gefangen.
 
 ---
 

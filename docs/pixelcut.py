@@ -755,13 +755,17 @@ def cmd_upscale(a):
 
 
 # ----------------------------------------------------------------------------- cli
-def main(argv=None):
-    for stream in (sys.stdout, sys.stderr):                   # a path with characters the console cannot show must not turn a finished job into an error
-        try:
-            stream.reconfigure(errors="backslashreplace")
-        except (AttributeError, ValueError):
-            pass
-    p = argparse.ArgumentParser(prog="pixelcut", description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+class PixelcutError(Exception):
+    """Raised by the Python API (never by the command line, which exits with the same message)."""
+
+
+class _ApiParser(argparse.ArgumentParser):
+    def error(self, message):
+        raise PixelcutError(message)
+
+
+def build_parser(parser_class=argparse.ArgumentParser):
+    p = parser_class(prog="pixelcut", description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     sub = p.add_subparsers(dest="cmd", required=True)
 
     s = sub.add_parser("alpha", help="white background -> transparent, exact over white")
@@ -813,8 +817,16 @@ def main(argv=None):
     s.add_argument("--bin", help="path to realesrgan-ncnn-vulkan (default: automatic)")
     s.add_argument("--no-ai", action="store_true", help="plain Lanczos resize: no download, no engine, works offline")
     s.set_defaults(fn=cmd_upscale)
+    return p
 
-    a = p.parse_args(argv)
+
+def main(argv=None):
+    for stream in (sys.stdout, sys.stderr):                   # a path with characters the console cannot show must not turn a finished job into an error
+        try:
+            stream.reconfigure(errors="backslashreplace")
+        except (AttributeError, ValueError):
+            pass
+    a = build_parser().parse_args(argv)
     try:
         a.fn(a)
     except (SystemExit, KeyboardInterrupt):
@@ -823,6 +835,102 @@ def main(argv=None):
         if os.environ.get("PIXELCUT_DEBUG"):
             raise
         sys.exit("error: %s (set PIXELCUT_DEBUG=1 for the full trace)" % (str(e).strip().splitlines() or [type(e).__name__])[0])
+
+
+# ----------------------------------------------------------------------------- python api
+# The functions below run exactly the command-line commands (same options, same defaults, same checks, same exactness), so
+# there is one truth. Options are keyword arguments with the flag names, dashes as underscores: split(.., only_inside=True).
+# Problems raise PixelcutError instead of exiting. Progress lines the command line prints are not shown.
+def _flags(opts):
+    argv = []
+    for key, val in opts.items():
+        flag = "--" + key.replace("_", "-")
+        if val is None or val is False:
+            continue
+        if val is True:
+            argv.append(flag)
+        else:
+            if isinstance(val, (list, tuple)):
+                val = ",".join(str(v) for v in val)
+            argv += [flag, str(val)]
+    return argv
+
+
+def _run(cmd, positional, opts):
+    import contextlib
+    import io
+    a = build_parser(_ApiParser).parse_args([cmd] + [str(x) for x in positional] + _flags(opts))
+    out = io.StringIO()
+    try:
+        with contextlib.redirect_stdout(out):
+            a.fn(a)
+    except SystemExit as e:
+        if e.code in (None, 0):
+            return out.getvalue()
+        raise PixelcutError(str(e.code).removeprefix("error: ")) from None
+    except (KeyboardInterrupt, PixelcutError):
+        raise
+    except BaseException as e:                                # same net as the command line (pyo3 panics are not Exceptions)
+        raise PixelcutError((str(e).strip().splitlines() or [type(e).__name__])[0]) from e
+    return out.getvalue()
+
+
+def alpha(input, output, verify=False):
+    """White background -> transparent (exact over white). Returns the output path."""
+    _run("alpha", [input, output], {"verify": verify})
+    return Path(output)
+
+
+def split(input, outdir, **options):
+    """Cut a picture into wedges (options: centre, angles, tooth, depth, gap, edge, only_inside, simplify, opaque, verify).
+    Returns the content of parts.json as a dict (size, parts, files, hit polygons); the pictures are part_N.png in outdir."""
+    _run("split", [input, outdir], options)
+    return json.loads((Path(outdir) / "parts.json").read_text(encoding="utf-8"))
+
+
+def join(parts, output):
+    """Put the parts of a split folder back together over white (exact). Returns the output path."""
+    _run("join", [parts, output], {})
+    return Path(output)
+
+
+def key(input, outdir, box, **options):
+    """Lift an element out of a flat area (box = x0,y0,x1,y1; options: scale, to, threshold, close). Returns outdir."""
+    _run("key", [input, outdir], dict(options, box=box))
+    return Path(outdir)
+
+
+def compare(first, second, resize=False):
+    """Returns {'ssim': .., 'mean_diff': .., 'max_diff': ..} for two images."""
+    import contextlib
+    import io
+    try:
+        with contextlib.redirect_stdout(io.StringIO()):
+            x, y = load_rgb(first), load_rgb(second)
+            if x.shape != y.shape:
+                if not resize:
+                    raise PixelcutError("the images have different sizes (%dx%d vs %dx%d) - use resize=True to scale the second one"
+                                        % (x.shape[1], x.shape[0], y.shape[1], y.shape[0]))
+                y = cv2.resize(y, (x.shape[1], x.shape[0]), interpolation=cv2.INTER_AREA)
+    except SystemExit as e:
+        raise PixelcutError(str(e.code).removeprefix("error: ")) from None
+    ss, mean, mx = measure(x, y)
+    return {"ssim": ss, "mean_diff": mean, "max_diff": mx}
+
+
+def trace(input, output, **options):
+    """Redraw as SVG (approximate; options: render, speckle, colors, layers). Returns the output path."""
+    _run("trace", [input, output], options)
+    return Path(output)
+
+
+def upscale(input, output, **options):
+    """Upscale (options: scale, model, bin, no_ai). Returns the output path."""
+    _run("upscale", [input, output], options)
+    return Path(output)
+
+
+__all__ = ["PixelcutError", "alpha", "split", "join", "key", "compare", "trace", "upscale"]
 
 
 if __name__ == "__main__":
