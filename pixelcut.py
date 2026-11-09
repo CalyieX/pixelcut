@@ -125,6 +125,17 @@ def refuse_inputs(inputs, outputs):
             sys.exit("error: %s is also an input - choose a different output file" % o)
 
 
+def refuse_inputs_in_workfolders(inputs, outdir):
+    """split keeps its scratch/backup folders inside outdir and clears them during recovery: an input that lives there would be
+    read first and then deleted or moved. Refuse that before anything is touched."""
+    work = [(Path(outdir) / n).resolve() for n in (DONE, ".pixelcut_old", ".pixelcut_new")]
+    for x in inputs:
+        rx = Path(x).resolve()
+        for wf in work:
+            if rx == wf or wf in rx.parents:
+                sys.exit("error: %s lies in %s, a work folder of pixelcut - move the picture elsewhere" % (x, wf))
+
+
 def need_folder_of(path):
     if not Path(path).resolve().parent.is_dir():
         sys.exit("error: the folder for %s does not exist" % path)
@@ -172,7 +183,27 @@ def open_upright(path):
     if orient not in (1, None, 0):
         print("note: %s is rotated by its EXIF orientation tag (%s) - turned upright like a viewer shows it" % (path, orient), file=sys.stderr)
         im = ImageOps.exif_transpose(im)
+    im.pixelcut_orientation = orient if orient in (2, 3, 4, 5, 6, 7, 8) else 1
     return im
+
+
+def upright_array(arr, orient):
+    """The same turn as ImageOps.exif_transpose, for a numpy array that was decoded without it (16 bit)."""
+    if orient == 2:
+        return arr[:, ::-1]
+    if orient == 3:
+        return np.rot90(arr, 2)
+    if orient == 4:
+        return arr[::-1]
+    if orient == 5:
+        return arr.swapaxes(0, 1)
+    if orient == 6:
+        return np.rot90(arr, -1)
+    if orient == 7:
+        return np.rot90(arr.swapaxes(0, 1), 2)
+    if orient == 8:
+        return np.rot90(arr, 1)
+    return arr
 
 
 def load_rgb(path):
@@ -187,6 +218,7 @@ def load_rgb(path):
         deep = cv2.imdecode(np.fromfile(str(path), np.uint8), cv2.IMREAD_UNCHANGED)
     if deep is not None and deep.dtype == np.uint16 and deep.ndim == 3:
         print("note: %s is 16 bit per channel - scaled to 8 bit, so the result is not exact for the full range" % path, file=sys.stderr)
+        deep = upright_array(deep, getattr(im, "pixelcut_orientation", 1))
         rgb16 = deep[:, :, :3][:, :, ::-1].astype(np.float64) if deep.shape[2] >= 3 else np.dstack([deep[:, :, 0]] * 3).astype(np.float64)
         if deep.shape[2] == 4:                                                              # transparency over white, as for 8 bit
             al = deep[:, :, 3:4].astype(np.float64) / 65535.0
@@ -222,10 +254,12 @@ def color_to_alpha(rgb):
     return np.dstack([col * 255, a * 255]).round().astype(np.uint8)
 
 
-def over_white(rgba_list):
-    h, w = rgba_list[0].shape[:2]
-    acc = np.full((h, w, 3), 255.0, np.float32)
-    for im in rgba_list:
+def over_white(rgba_iter):
+    """Composite parts over white, one at a time (a list or a generator): memory stays one picture, not one per part."""
+    acc = None
+    for im in rgba_iter:
+        if acc is None:
+            acc = np.full(im.shape[:2] + (3,), 255.0, np.float32)
         al = im[:, :, 3:4].astype(np.float32) / 255.0
         acc = acc * (1 - al) + im[:, :, :3].astype(np.float32) * al
     return acc
@@ -371,6 +405,8 @@ def read_label_map(path, w, h):
 def cmd_labels(a):
     refuse_inputs([a.input], [a.output])
     need_folder_of(a.output)
+    if Path(a.output).suffix.lower() not in (".png", ".tif", ".tiff", ".bmp"):
+        sys.exit("error: a label map must be saved lossless (.png, .tif or .bmp) - JPEG would change the part numbers")
     w, h = open_upright(a.input).size
     cols, rows = parse_grid(a.grid, w, h)
     ids = grid_cells((h, w), cols, rows)
@@ -383,6 +419,7 @@ def cmd_split(a):
         sys.exit("use either --grid or --from-labels, not both")
     refuse_inputs([a.input] + ([a.from_labels] if a.from_labels else []),
                   [Path(a.outdir) / n for n in ["parts.json"] + ["part_%d.png" % k for k in range(MAX_PARTS)]])
+    refuse_inputs_in_workfolders([a.input] + ([a.from_labels] if a.from_labels else []), a.outdir)
     rgb = load_rgb(a.input)
     h, w = rgb.shape[:2]
     grid = parse_grid(a.grid, w, h) if a.grid else None
@@ -536,12 +573,13 @@ def cmd_split(a):
     print("wrote %d parts + parts.json to %s" % (len(angles), out))
     if a.verify:
         # without slit and edge the parts must add up to the original over white
-        flat = [rgba.copy() for _ in angles]
-        for k, im in enumerate(flat):
+        def masked(k):
+            im = rgba.copy()
             im[sector != k] = 0
-        err = np.abs(over_white(flat) - rgb.astype(np.float32)).max()
+            return im
+        err = np.abs(over_white(masked(k) for k in range(len(angles))) - rgb.astype(np.float32)).max()
         print("max deviation over white without slit: %.2f / 255" % err)
-        real = over_white([np.array(Image.open(out / ("part_%d.png" % k)).convert("RGBA")) for k in range(len(angles))])
+        real = over_white(np.array(Image.open(out / ("part_%d.png" % k)).convert("RGBA")) for k in range(len(angles)))
         real_err = np.abs(real - rgb.astype(np.float32)).max()
         print("saved files joined over white:        %.2f / 255 (with --gap %.1f --edge %.1f the slit is visible on purpose; 0 slit = exact)" % (real_err, a.gap, a.edge))
 
@@ -639,14 +677,16 @@ def cmd_join(a):
             sys.exit("part numbering has a gap (missing part_%d.png) - without parts.json every part is needed" % gaps[0])
     if not files:
         sys.exit("no part_*.png in %s" % a.parts)
-    ims = [np.array(Image.open(f).convert("RGBA")) for f in files]
-    shapes = {im.shape[:2] for im in ims}
+    shapes = set()
+    for f in files:                                           # sizes come from the file headers: nothing is decoded yet
+        with Image.open(f) as pim:
+            shapes.add((pim.height, pim.width))
     if len(shapes) != 1 or (size and (size[1], size[0]) not in shapes):
         sys.exit("the parts do not all have the same size%s" % (" as parts.json says" if size else ""))
     refuse_inputs(files + [Path(a.parts) / "parts.json"], [a.output])
-    out = over_white(ims)
+    out = over_white(np.array(Image.open(f).convert("RGBA")) for f in files)
     save_atomic(Image.fromarray(np.clip(out, 0, 255).round().astype(np.uint8)), a.output)
-    print("joined %d parts -> %s" % (len(ims), a.output))
+    print("joined %d parts -> %s" % (len(files), a.output))
 
 
 def measure(x, y):
@@ -936,17 +976,17 @@ def _flags(opts):
         else:
             if isinstance(val, (list, tuple)):
                 val = ",".join(str(v) for v in val)
-            argv += [flag, str(val)]
+            argv.append("%s=%s" % (flag, val))                # '--angles=-90,90': a value that starts with '-' must stay attached
     return argv
 
 
 def _run(cmd, positional, opts):
     import contextlib
     import io
-    a = build_parser(_ApiParser).parse_args([cmd] + [str(x) for x in positional] + _flags(opts))
     out = io.StringIO()
     try:
-        with contextlib.redirect_stdout(out):
+        with contextlib.redirect_stdout(out), contextlib.redirect_stderr(io.StringIO()):   # the API prints nothing, notes included
+            a = build_parser(_ApiParser).parse_args([cmd] + [str(x) for x in positional] + _flags(opts))
             a.fn(a)
     except SystemExit as e:
         if e.code in (None, 0):
@@ -997,7 +1037,7 @@ def compare(first, second, resize=False):
     import contextlib
     import io
     try:
-        with contextlib.redirect_stdout(io.StringIO()):
+        with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
             x, y = load_rgb(first), load_rgb(second)
             if x.shape != y.shape:
                 if not resize:
@@ -1006,8 +1046,10 @@ def compare(first, second, resize=False):
                 y = cv2.resize(y, (x.shape[1], x.shape[0]), interpolation=cv2.INTER_AREA)
     except SystemExit as e:
         raise PixelcutError(str(e.code).removeprefix("error: ")) from None
+    except OSError as e:                                      # missing / unreadable / not a picture
+        raise PixelcutError("cannot read the picture: %s" % (str(e).strip().splitlines() or [type(e).__name__])[0]) from e
     ss, mean, mx = measure(x, y)
-    return {"ssim": ss, "mean_diff": mean, "max_diff": mx}
+    return {"ssim": float(ss), "mean_diff": float(mean), "max_diff": float(mx)}
 
 
 def trace(input, output, **options):

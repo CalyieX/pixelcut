@@ -10,7 +10,7 @@ from pathlib import Path
 import cv2
 import numpy as np
 import pytest
-from PIL import Image
+from PIL import Image, ImageOps
 
 ROOT = Path(__file__).resolve().parent.parent
 EX = EX_DIR = ROOT / "examples"
@@ -910,3 +910,71 @@ def test_label_map_rejects_nonsense(tmp_path):
         pixelcut.split(tmp_path / "o.png", tmp_path / "x", grid="2x2", from_labels=tmp_path / "one.png")
     with pytest.raises(pixelcut.PixelcutError, match="is also an input"):
         pixelcut.labels(tmp_path / "o.png", tmp_path / "o.png", grid="2x2")
+
+
+def test_input_inside_a_work_folder_is_refused_and_kept(tmp_path):
+    import pixelcut
+    for work in (".pixelcut_new", ".pixelcut_done", ".pixelcut_old"):
+        out = tmp_path / ("o" + work)
+        (out / work).mkdir(parents=True)
+        Image.new("RGB", (30, 20), "red").save(out / work / "part_0.png")
+        with pytest.raises(pixelcut.PixelcutError, match="work folder"):
+            pixelcut.split(out / work / "part_0.png", out, grid="2x2")
+        assert (out / work / "part_0.png").exists(), work
+
+
+def test_join_and_verify_hold_one_picture_not_all_parts(tmp_path):
+    import pixelcut
+    Image.fromarray((np.random.RandomState(3).rand(40, 60, 3) * 255).astype("uint8")).save(tmp_path / "o.png")
+    pixelcut.split(tmp_path / "o.png", tmp_path / "p", grid="8x5", opaque=True, verify=True)
+    calls = []
+    real = pixelcut.over_white
+
+    def watch(it):
+        assert not isinstance(it, list)                             # a generator: parts are produced one at a time
+        calls.append(1)
+        return real(it)
+    pixelcut.over_white = watch
+    try:
+        pixelcut.join(tmp_path / "p", tmp_path / "j.png")
+    finally:
+        pixelcut.over_white = real
+    assert calls and pixelcut.compare(tmp_path / "o.png", tmp_path / "j.png")["max_diff"] == 0
+
+
+def test_labels_refuses_lossy_formats(tmp_path):
+    import pixelcut
+    Image.new("RGB", (32, 32), "red").save(tmp_path / "o.png")
+    with pytest.raises(pixelcut.PixelcutError, match="lossless"):
+        pixelcut.labels(tmp_path / "o.png", tmp_path / "m.jpg", grid="8x8")
+    assert not (tmp_path / "m.jpg").exists()
+
+
+def test_exif_rotation_also_for_16_bit_png(tmp_path):
+    import pixelcut
+    for orient in (2, 3, 4, 5, 6, 7, 8):
+        a16 = (np.arange(6 * 10 * 3).reshape(6, 10, 3) * 300).astype(np.uint16)
+        import cv2
+        cv2.imencode(".png", a16)[1].tofile(str(tmp_path / "raw.png"))
+        im = Image.open(tmp_path / "raw.png")
+        ex = Image.Exif()
+        ex[274] = orient
+        im.save(tmp_path / "e.png", exif=ex)
+        want = np.array(ImageOps.exif_transpose(Image.open(tmp_path / "e.png").convert("RGB")))
+        got = pixelcut.load_rgb(tmp_path / "e.png")
+        assert got.shape == want.shape, orient
+        pixelcut.labels(tmp_path / "e.png", tmp_path / "m.png", grid="2x2")
+        pixelcut.split(tmp_path / "e.png", tmp_path / ("s%d" % orient), from_labels=tmp_path / "m.png", opaque=True)
+
+
+def test_api_negative_angles_quiet_and_clean_errors(tmp_path, capsys):
+    import pixelcut
+    Image.new("RGBA", (40, 30), (255, 0, 0, 128)).save(tmp_path / "t.png")
+    info = pixelcut.split(tmp_path / "t.png", tmp_path / "n", angles=[-90, 90], gap=0, edge=0, opaque=True)
+    assert len(info["files"]) == 2
+    pixelcut.alpha(tmp_path / "t.png", tmp_path / "a.png")
+    captured = capsys.readouterr()
+    assert captured.out == "" and captured.err == ""                # not even the transparency note
+    with pytest.raises(pixelcut.PixelcutError):
+        pixelcut.compare(tmp_path / "missing.png", tmp_path / "t.png")
+    assert type(pixelcut.compare(tmp_path / "t.png", tmp_path / "t.png")["ssim"]) is float
