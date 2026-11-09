@@ -21,6 +21,7 @@ import json
 import os
 import re
 import shutil
+import stat
 import sys
 from pathlib import Path
 
@@ -55,13 +56,35 @@ def manifest_files(m):
 JOURNAL = ".journal.json"
 
 
+def link_like(path):
+    """Symlink or Windows junction/reparse point: it points somewhere else, so whatever we do 'in' it happens elsewhere."""
+    st = os.lstat(path)
+    return stat.S_ISLNK(st.st_mode) or bool(getattr(st, "st_file_attributes", 0) & 0x400)
+
+
+def real_folder(folder, what):
+    if folder.exists() and (link_like(folder) or not folder.is_dir()):
+        sys.exit("%s is a link or not a folder - pixelcut will not work inside it (%s)" % (folder, what))
+
+
+def save_atomic(img, path):
+    """Write next to the target, replace only when complete: an abort never leaves half a picture in place of a good one."""
+    path = Path(path)
+    tmp = path.with_name(".pixelcut_tmp_" + path.name)
+    try:
+        img.save(tmp)
+        os.replace(tmp, path)
+    finally:
+        tmp.unlink(missing_ok=True)
+
+
 def foreign_entries(folder, extra=()):
     """Names in a pixelcut scratch/backup folder that pixelcut did not put there. Only plain files with pixelcut's own
     names count as ours - a directory or a link called part_0.png is foreign, whatever it is named."""
     bad = []
     for f in folder.iterdir():
         own = (PART_NAME.fullmatch(f.name) or f.name in ("parts.json", JOURNAL, JOURNAL + ".tmp") or f.name in extra)
-        if not own or f.is_symlink() or not f.is_file():
+        if not own or link_like(f) or not f.is_file():
             bad.append(f.name)
     return bad
 DONE = ".pixelcut_done"
@@ -175,7 +198,7 @@ def fattest_point(mask):
 def cmd_alpha(a):
     rgb = load_rgb(a.input)
     rgba = color_to_alpha(rgb)
-    Image.fromarray(rgba, "RGBA").save(a.output)
+    save_atomic(Image.fromarray(rgba, "RGBA"), a.output)
     if a.verify:
         err = np.abs(over_white([rgba]) - rgb.astype(np.float32)).max()
         print("max deviation over white: %.2f / 255" % err)
@@ -269,6 +292,8 @@ def cmd_split(a):
             sector[cc] = np.bincount(sector[cc].ravel()).argmax()
     out = Path(a.outdir)
     out.mkdir(parents=True, exist_ok=True)
+    for scratch in (DONE, ".pixelcut_old", ".pixelcut_new"):
+        real_folder(out / scratch, "scratch folder")
     if (out / DONE).is_dir():                                 # the swap had finished, only the clean-up was interrupted
         if foreign_entries(out / DONE):
             sys.exit("%s holds files pixelcut did not put there - check and remove it first" % (out / DONE))
@@ -344,9 +369,11 @@ def cmd_split(a):
             if (out / name).is_file():                        #    roll-back is finished by the next run from the same list)
                 (out / name).unlink()
         (backup / JOURNAL).unlink(missing_ok=True)            # 2. only now may the journal go - the files restored next must not be taken out again
-        for name in moved:                                    # 3. restore the old set
-            os.replace(backup / name, out / name)
-        shutil.rmtree(backup, ignore_errors=True)
+        for f in list(backup.iterdir()):                      # 3. restore whatever is really in the backup (an abort between the move and the
+            if f.name != JOURNAL + ".tmp":                    #    bookkeeping must not hide a file), and never delete a backup that is not empty
+                os.replace(f, out / f.name)
+        (backup / (JOURNAL + ".tmp")).unlink(missing_ok=True)
+        backup.rmdir()
         shutil.rmtree(staging, ignore_errors=True)
         raise
     os.replace(backup, out / DONE)                            # commit point: from here on the new set is the truth
@@ -457,7 +484,7 @@ def cmd_join(a):
     if len(shapes) != 1 or (size and (size[1], size[0]) not in shapes):
         sys.exit("the parts do not all have the same size%s" % (" as parts.json says" if size else ""))
     out = over_white(ims)
-    Image.fromarray(np.clip(out, 0, 255).round().astype(np.uint8)).save(a.output)
+    save_atomic(Image.fromarray(np.clip(out, 0, 255).round().astype(np.uint8)), a.output)
     print("joined %d parts -> %s" % (len(ims), a.output))
 
 
@@ -505,6 +532,11 @@ def cmd_trace(a):
         sys.exit("--speckle must be 0..128, --colors 1..8, --layers 0..255")
     if not Path(a.output).resolve().parent.is_dir():
         sys.exit("error: the folder for %s does not exist" % a.output)
+    here = Path(a.input).resolve()
+    if Path(a.output).resolve() == here:
+        sys.exit("error: the SVG must be a different file than the input")
+    if a.render and Path(a.render).resolve() in (here, Path(a.output).resolve()):
+        sys.exit("error: --render must be a different file than the input and the SVG")
     vtracer.convert_image_to_svg_py(a.input, a.output, colormode="color", hierarchical="stacked", mode="spline",
                                     filter_speckle=a.speckle, color_precision=a.colors, layer_difference=a.layers,
                                     corner_threshold=60, length_threshold=3.5, splice_threshold=45, path_precision=3)
@@ -592,7 +624,7 @@ def lanczos_upscale(a, why):
     print("Real-ESRGAN not usable here (%s) - using plain Lanczos resize instead (no AI detail)." % why)
     im = Image.open(a.input)
     im = im.convert("RGBA" if (im.mode in ("RGBA", "LA", "PA") or "transparency" in im.info) else "RGB")   # keep transparency
-    im.resize((im.width * a.scale, im.height * a.scale), Image.LANCZOS).save(a.output)
+    save_atomic(im.resize((im.width * a.scale, im.height * a.scale), Image.LANCZOS), a.output)
     print("wrote", a.output)
 
 
@@ -607,15 +639,22 @@ def cmd_upscale(a):
     exe = a.bin or ensure_esrgan()
     if not exe:
         return lanczos_upscale(a, "no build for this machine")
+    target = Path(a.output).resolve()
+    tmp = target.with_name(".pixelcut_tmp_" + target.name)    # the engine writes beside the target; a finished file replaces it, a failed one never does
     try:
-        subprocess.run([exe, "-i", str(Path(a.input).resolve()), "-o", str(Path(a.output).resolve()), "-n", a.model, "-s", str(a.scale)],
+        subprocess.run([exe, "-i", str(Path(a.input).resolve()), "-o", str(tmp), "-n", a.model, "-s", str(a.scale)],
                        check=True, cwd=str(Path(exe).parent), capture_output=True, timeout=1800)
+        if not tmp.is_file() or tmp.stat().st_size == 0:
+            raise OSError("the engine produced no picture")
+        os.replace(tmp, target)
     except subprocess.TimeoutExpired:
         return lanczos_upscale(a, "the engine did not finish in 30 minutes")
     except OSError as e:
         return lanczos_upscale(a, "cannot start: %s" % e)
     except subprocess.CalledProcessError:
         return lanczos_upscale(a, "needs a Vulkan GPU/driver")
+    finally:
+        tmp.unlink(missing_ok=True)
     print("wrote", a.output)
 
 

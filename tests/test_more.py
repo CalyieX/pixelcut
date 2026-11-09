@@ -1,6 +1,7 @@
 """Second ring of tests: analytic geometry (close and odd angles), the numbers printed by --verify, gap/edge widths, input
 conversions with known results, key/trace/upscale details, manifest handling and the download guard."""
 import json
+import os
 import math
 import subprocess
 import sys
@@ -603,3 +604,73 @@ def test_unprintable_characters_in_a_path_do_not_fail_the_job(tmp_path):
                         "--opaque", "--angles", "0,180", "--gap", "0", "--edge", "0"], capture_output=True, text=True, env=env)
     assert r.returncode == 0, r.stderr
     assert (target / "parts.json").exists()
+
+
+def test_abort_between_backup_move_and_bookkeeping_loses_nothing(tmp_path, monkeypatch):
+    import os
+    import pixelcut
+    out = tmp_path / "k"
+    cli("split", EX / "photo_cat.png", out, "--opaque", "--angles", "0,180", "--gap", "0", "--edge", "0")
+    before = {f.name: f.read_bytes() for f in out.iterdir()}
+    real, st = os.replace, {"hit": False}
+
+    def interrupt_after_first_backup_move(a, b):
+        r = real(a, b)
+        if Path(b).parent.name == ".pixelcut_old" and Path(b).name.startswith("part_") and not st["hit"]:
+            st["hit"] = True
+            raise KeyboardInterrupt                                # the file is already in the backup, the bookkeeping never ran
+        return r
+    monkeypatch.setattr(os, "replace", interrupt_after_first_backup_move)
+    monkeypatch.setattr(sys, "argv", ["pixelcut", "split", str(EX / "photo_cat.png"), str(out), "--opaque", "--angles", "0,90,180", "--gap", "0", "--edge", "0"])
+    with pytest.raises(KeyboardInterrupt):
+        pixelcut.main()
+    assert st["hit"]
+    assert {f.name: f.read_bytes() for f in out.iterdir()} == before
+
+
+@pytest.mark.parametrize("scratch", [".pixelcut_old", ".pixelcut_new", ".pixelcut_done"])
+def test_scratch_folder_that_is_a_link_is_refused(tmp_path, scratch):
+    out = tmp_path / "j"
+    out.mkdir()
+    elsewhere = tmp_path / "elsewhere"
+    elsewhere.mkdir()
+    (out / "part_0.png").write_bytes(b"not pixelcut's")             # a foreign file the run must not move
+    if sys.platform == "win32":
+        r = subprocess.run(["cmd", "/c", "mklink", "/J", str(out / scratch), str(elsewhere)], capture_output=True)
+        if r.returncode != 0:
+            pytest.skip("cannot create a junction here")
+    else:
+        os.symlink(elsewhere, out / scratch)
+    err = fails("split", EX / "photo_cat.png", out, "--opaque", "--angles", "0,180")
+    assert "link" in err or "pixelcut" in err
+    assert (out / "part_0.png").read_bytes() == b"not pixelcut's"
+    assert not list(elsewhere.iterdir())
+
+
+def test_upscale_abort_keeps_the_existing_result(tmp_path, monkeypatch):
+    import pixelcut
+    Image.new("RGB", (10, 8), "red").save(tmp_path / "s.png")
+    good = tmp_path / "b.png"
+    Image.new("RGB", (30, 24), "blue").save(good)
+    keep = good.read_bytes()
+    real = Image.Image.save
+
+    def partial(self, fp, *a, **k):
+        if Path(str(fp)).name.startswith(".pixelcut_tmp_"):
+            Path(fp).write_bytes(b"PARTIAL PNG")
+            raise KeyboardInterrupt
+        return real(self, fp, *a, **k)
+    monkeypatch.setattr(Image.Image, "save", partial)
+    monkeypatch.setattr(sys, "argv", ["pixelcut", "upscale", str(tmp_path / "s.png"), str(good), "--scale", "3", "--no-ai"])
+    with pytest.raises(KeyboardInterrupt):
+        pixelcut.main()
+    assert good.read_bytes() == keep
+    assert not list(tmp_path.glob(".pixelcut_tmp_*"))
+
+
+def test_trace_refuses_same_input_and_output(tmp_path):
+    Image.new("RGB", (20, 20), "black").save(tmp_path / "x.png")
+    keep = (tmp_path / "x.png").read_bytes()
+    assert "different file" in fails("trace", tmp_path / "x.png", tmp_path / "x.png")
+    assert (tmp_path / "x.png").read_bytes() == keep
+    assert "different file" in fails("trace", tmp_path / "x.png", tmp_path / "x.svg", "--render", tmp_path / "x.svg")
