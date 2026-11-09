@@ -523,3 +523,62 @@ def test_manifest_from_before_the_files_field_can_be_recut(tmp_path):
     (out / "parts.json").write_text(json.dumps(m))
     cli("split", EX / "photo_cat.png", out, "--opaque", "--angles", "0,90,180", "--gap", "0", "--edge", "0")
     assert len(list(out.glob("part_*.png"))) == 3
+
+
+def test_foreign_done_folder_is_never_deleted(tmp_path):
+    out = tmp_path / "x"
+    cli("split", EX / "photo_cat.png", out, "--opaque", "--angles", "0,180", "--gap", "0", "--edge", "0")
+    (out / ".pixelcut_done").mkdir()
+    (out / ".pixelcut_done" / "notes.txt").write_text("mine")
+    assert "did not put there" in fails("split", EX / "photo_cat.png", out, "--opaque", "--angles", "0,180")
+    assert (out / ".pixelcut_done" / "notes.txt").read_text() == "mine"
+
+
+@pytest.mark.parametrize("manifest", ['{"parts": []}', '{"parts": [{}], "files": ["part_0.png"]}',
+                                      '{"parts": [{"part": 0, "starts_at_angle": 0}], "size": [10, 10], "centre": [1, 1], "files": ["part_0.png", "part_0.png"]}',
+                                      '[1, 2]'])
+def test_lookalike_manifests_are_not_ours(tmp_path, manifest):
+    out = tmp_path / "n"
+    out.mkdir()
+    (out / "parts.json").write_text(manifest)
+    (out / "part_0.png").write_bytes(b"someone elses picture")
+    assert "not a pixelcut manifest" in fails("split", EX / "photo_cat.png", out, "--opaque", "--angles", "0,180")
+    assert (out / "part_0.png").read_bytes() == b"someone elses picture" and (out / "parts.json").read_text() == manifest
+
+
+def test_failing_rollback_is_finished_by_the_next_run(tmp_path, monkeypatch):
+    import os
+    import pixelcut
+    out = tmp_path / "d"
+    cli("split", EX / "photo_cat.png", out, "--opaque", "--angles", "0,180", "--gap", "0", "--edge", "0")
+    before = {f.name: f.read_bytes() for f in out.iterdir()}
+    real, st = os.replace, {"installs": 0}
+    real_unlink = Path.unlink
+
+    def flaky_replace(a, b):                                       # growing 2 -> 4 parts: the 3rd install fails ...
+        if Path(a).parent.name == ".pixelcut_new":
+            st["installs"] += 1
+            if st["installs"] == 3:
+                raise OSError("install failed")
+        return real(a, b)
+
+    def flaky_unlink(self, *a, **k):                               # ... and then taking the first new file back fails too
+        if self.name == "part_0.png" and st["installs"] == 3 and self.parent == out:
+            st["installs"] = 99
+            raise OSError("rollback failed")
+        return real_unlink(self, *a, **k)
+    monkeypatch.setattr(os, "replace", flaky_replace)
+    monkeypatch.setattr(Path, "unlink", flaky_unlink)
+    monkeypatch.setattr(sys, "argv", ["pixelcut", "split", str(EX / "photo_cat.png"), str(out), "--opaque", "--angles", "0,90,180,270", "--gap", "0", "--edge", "0"])
+    with pytest.raises(BaseException):
+        pixelcut.main()
+    monkeypatch.undo()
+    cli("split", EX / "photo_cat.png", out, "--opaque", "--angles", "0,180", "--gap", "0", "--edge", "0")   # next run recovers, then works
+    assert {f.name: f.read_bytes() for f in out.iterdir()} == before
+
+
+def test_empty_part_has_no_fattest_point(tmp_path):
+    Image.new("RGB", (40, 30), (254, 254, 254)).save(tmp_path / "w.png")
+    cli("split", tmp_path / "w.png", tmp_path / "o", "--angles", "0,180", "--gap", "0", "--edge", "0")
+    m = json.loads((tmp_path / "o" / "parts.json").read_text())
+    assert all(x["fattest_point"] is None and x["polygon"] == [] for x in m["parts"])

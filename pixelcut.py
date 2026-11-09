@@ -30,6 +30,28 @@ from PIL import Image
 
 
 PART_NAME = re.compile(r"part_\d+\.png")
+
+
+def manifest_files(m):
+    """Validate a pixelcut manifest and return its part file names. Raises ValueError for anything that is not one.
+    Manifests from v1.0/1.1 have no 'files' list: the names are then part_0..part_N-1."""
+    if not isinstance(m, dict) or not isinstance(m.get("parts"), list) or not m["parts"]:
+        raise ValueError("no parts")
+    size = m.get("size")
+    if not (isinstance(size, list) and len(size) == 2 and all(isinstance(v, int) and not isinstance(v, bool) and v > 0 for v in size)):
+        raise ValueError("bad size")
+    c = m.get("centre")
+    if not (isinstance(c, list) and len(c) == 2 and all(isinstance(v, (int, float)) and not isinstance(v, bool) for v in c)):
+        raise ValueError("bad centre")
+    if not all(isinstance(x, dict) and isinstance(x.get("part"), int) and isinstance(x.get("starts_at_angle"), (int, float)) for x in m["parts"]):
+        raise ValueError("bad part entries")
+    names = m.get("files") or ["part_%d.png" % k for k in range(len(m["parts"]))]
+    if not (isinstance(names, list) and len(names) == len(m["parts"]) == len(set(names))
+            and all(isinstance(x, str) and PART_NAME.fullmatch(x) for x in names)):
+        raise ValueError("bad file list")
+    return names
+
+
 JOURNAL = ".journal.json"
 DONE = ".pixelcut_done"
 
@@ -131,6 +153,8 @@ def contour_polygons(mask, eps, min_area=4):
 
 
 def fattest_point(mask):
+    if not mask.any():
+        return None                                           # nothing solid in this part (e.g. only faint pixels): no honest answer
     d = cv2.distanceTransform(mask.astype(np.uint8), cv2.DIST_L2, 5)
     y, x = np.unravel_index(np.argmax(d), d.shape)
     return [int(x), int(y)]
@@ -235,6 +259,8 @@ def cmd_split(a):
     out = Path(a.outdir)
     out.mkdir(parents=True, exist_ok=True)
     if (out / DONE).is_dir():                                 # the swap had finished, only the clean-up was interrupted
+        if any(not (PART_NAME.fullmatch(f.name) or f.name in ("parts.json", JOURNAL, JOURNAL + ".tmp")) for f in (out / DONE).iterdir()):
+            sys.exit("%s holds files pixelcut did not put there - check and remove it first" % (out / DONE))
         shutil.rmtree(out / DONE)
     leftover = out / ".pixelcut_old"                          # an earlier run was interrupted while swapping: its old set is the only full copy
     if leftover.is_dir():
@@ -260,11 +286,7 @@ def cmd_split(a):
     ours = set()
     if old_manifest.exists():
         try:
-            old = json.loads(old_manifest.read_text())
-            listed = old.get("files") or ["part_%d.png" % k for k in range(len(old.get("parts", [])))]    # v1.0/1.1 had no 'files'
-            ours = {n for n in listed if isinstance(n, str) and PART_NAME.fullmatch(n)}
-            if not (isinstance(listed, list) and isinstance(json.loads(old_manifest.read_text()).get("parts"), list)):
-                raise ValueError("no pixelcut manifest")
+            ours = set(manifest_files(json.loads(old_manifest.read_text())))
         except Exception:                                    # a parts.json that is not ours is never touched
             sys.exit("%s exists but is not a pixelcut manifest - use an empty folder" % old_manifest)
     clash = [("part_%d.png" % k) for k in range(len(angles)) if (out / ("part_%d.png" % k)).exists() and ("part_%d.png" % k) not in ours]
@@ -307,11 +329,11 @@ def cmd_split(a):
             write_journal(backup, installed)
             os.replace(staging / name, out / name)
     except BaseException:
-        (backup / JOURNAL).unlink(missing_ok=True)            # the roll-back below must not be undone by a recovery if it is interrupted itself
-        for name in installed:                                # take back exactly what this run put in place, then restore the old set
-            if (out / name).is_file():
+        for name in installed:                                # 1. take back exactly what this run put in place (journal stays: an interrupted
+            if (out / name).is_file():                        #    roll-back is finished by the next run from the same list)
                 (out / name).unlink()
-        for name in moved:
+        (backup / JOURNAL).unlink(missing_ok=True)            # 2. only now may the journal go - the files restored next must not be taken out again
+        for name in moved:                                    # 3. restore the old set
             os.replace(backup / name, out / name)
         shutil.rmtree(backup, ignore_errors=True)
         shutil.rmtree(staging, ignore_errors=True)
