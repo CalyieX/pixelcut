@@ -31,6 +31,14 @@ from PIL import Image
 
 PART_NAME = re.compile(r"part_\d+\.png")
 JOURNAL = ".journal.json"
+DONE = ".pixelcut_done"
+
+
+def write_journal(folder, names):
+    """Atomic: a crash leaves either the old or the new journal, never half a file."""
+    tmp = folder / (JOURNAL + ".tmp")
+    tmp.write_text(json.dumps(names))
+    os.replace(tmp, folder / JOURNAL)
 
 
 # ----------------------------------------------------------------------------- helpers
@@ -226,9 +234,11 @@ def cmd_split(a):
             sector[cc] = np.bincount(sector[cc].ravel()).argmax()
     out = Path(a.outdir)
     out.mkdir(parents=True, exist_ok=True)
+    if (out / DONE).is_dir():                                 # the swap had finished, only the clean-up was interrupted
+        shutil.rmtree(out / DONE)
     leftover = out / ".pixelcut_old"                          # an earlier run was interrupted while swapping: its old set is the only full copy
     if leftover.is_dir():
-        strange = [f.name for f in leftover.iterdir() if not (PART_NAME.fullmatch(f.name) or f.name in ("parts.json", JOURNAL))]
+        strange = [f.name for f in leftover.iterdir() if not (PART_NAME.fullmatch(f.name) or f.name in ("parts.json", JOURNAL, JOURNAL + ".tmp"))]
         if strange:
             sys.exit("%s holds files pixelcut did not put there (%s) - check and remove it first" % (leftover, ", ".join(strange)))
         journal = leftover / JOURNAL
@@ -240,6 +250,8 @@ def cmd_split(a):
             except ValueError:
                 pass
             journal.unlink()
+        if (leftover / (JOURNAL + ".tmp")).is_file():
+            (leftover / (JOURNAL + ".tmp")).unlink()
         for f in leftover.iterdir():                          # only pixelcut's own names are ever restored
             os.replace(f, out / f.name)
         shutil.rmtree(leftover)
@@ -248,7 +260,8 @@ def cmd_split(a):
     ours = set()
     if old_manifest.exists():
         try:
-            listed = json.loads(old_manifest.read_text()).get("files", [])
+            old = json.loads(old_manifest.read_text())
+            listed = old.get("files") or ["part_%d.png" % k for k in range(len(old.get("parts", [])))]    # v1.0/1.1 had no 'files'
             ours = {n for n in listed if isinstance(n, str) and PART_NAME.fullmatch(n)}
             if not (isinstance(listed, list) and isinstance(json.loads(old_manifest.read_text()).get("parts"), list)):
                 raise ValueError("no pixelcut manifest")
@@ -282,7 +295,7 @@ def cmd_split(a):
     (staging / "parts.json").write_text(json.dumps({"size": [w, h], "centre": list(centre), "files": files, "parts": info}, indent=1))
     backup = out / ".pixelcut_old"                            # old files are moved aside, not deleted - an abort rolls back
     backup.mkdir()                                            # (a leftover one was restored above, so this is always new)
-    (backup / JOURNAL).write_text("[]")                       # names this run is installing, written BEFORE each install (all old files are aside by then)
+    write_journal(backup, [])                       # names this run is installing, written BEFORE each install (all old files are aside by then)
     moved, installed = [], []
     try:
         for name in sorted(ours | {"parts.json"}):
@@ -291,9 +304,10 @@ def cmd_split(a):
                 moved.append(name)
         for name in files + ["parts.json"]:
             installed.append(name)
-            (backup / JOURNAL).write_text(json.dumps(installed))
+            write_journal(backup, installed)
             os.replace(staging / name, out / name)
     except BaseException:
+        (backup / JOURNAL).unlink(missing_ok=True)            # the roll-back below must not be undone by a recovery if it is interrupted itself
         for name in installed:                                # take back exactly what this run put in place, then restore the old set
             if (out / name).is_file():
                 (out / name).unlink()
@@ -302,7 +316,8 @@ def cmd_split(a):
         shutil.rmtree(backup, ignore_errors=True)
         shutil.rmtree(staging, ignore_errors=True)
         raise
-    shutil.rmtree(backup)
+    os.replace(backup, out / DONE)                            # commit point: from here on the new set is the truth
+    shutil.rmtree(out / DONE)
     shutil.rmtree(staging)
     print("wrote %d parts + parts.json to %s" % (len(parts), out))
     if a.verify:

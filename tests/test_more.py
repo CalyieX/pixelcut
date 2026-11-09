@@ -436,7 +436,7 @@ def test_rollback_after_a_failed_backup_step_keeps_unmoved_originals(tmp_path, m
     real, calls = os.replace, {"n": 0}
 
     def flaky(a, b):
-        if Path(b).parent.name == ".pixelcut_old":             # the SECOND backup move fails: one original is still in place
+        if Path(b).parent.name == ".pixelcut_old" and Path(b).name != ".journal.json":             # the SECOND backup move fails: one original is still in place
             calls["n"] += 1
             if calls["n"] == 2:
                 raise OSError("disk went away")
@@ -501,3 +501,25 @@ def test_crash_after_first_backup_step_keeps_the_unmoved_original(tmp_path):
     (old / ".journal.json").write_text("[]")
     cli("split", EX / "photo_cat.png", out, "--opaque", "--angles", "0,180", "--gap", "0", "--edge", "0")
     assert {f.name: f.read_bytes() for f in out.iterdir()} == before
+
+
+def test_finished_swap_with_interrupted_cleanup_is_not_rolled_back(tmp_path):
+    out = tmp_path / "c"
+    cli("split", EX / "photo_cat.png", out, "--opaque", "--angles", "0,180", "--gap", "0", "--edge", "0")
+    before = {f.name: f.read_bytes() for f in out.iterdir()}
+    done = out / ".pixelcut_done"                                  # crash while deleting the committed backup: half-empty
+    done.mkdir()
+    (done / "part_1.png").write_bytes(b"old leftover")
+    cli("split", EX / "photo_cat.png", out, "--opaque", "--angles", "0,180", "--gap", "0", "--edge", "0")
+    assert not done.exists()
+    assert {f.name: f.read_bytes() for f in out.iterdir()} == before
+
+
+def test_manifest_from_before_the_files_field_can_be_recut(tmp_path):
+    out = tmp_path / "l"
+    cli("split", EX / "photo_cat.png", out, "--opaque", "--angles", "0,180", "--gap", "0", "--edge", "0")
+    m = json.loads((out / "parts.json").read_text())
+    del m["files"]
+    (out / "parts.json").write_text(json.dumps(m))
+    cli("split", EX / "photo_cat.png", out, "--opaque", "--angles", "0,90,180", "--gap", "0", "--edge", "0")
+    assert len(list(out.glob("part_*.png"))) == 3
