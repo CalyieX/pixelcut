@@ -20,3 +20,21 @@ jobs:
       - run: python -m pip install -e ".[test]"
       - run: python -m pytest -q tests
       - run: pixelcut --help
+
+  web:
+    name: web (${{ matrix.engine }})
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { os: macos-latest, engine: webkit }      # the engine of Safari, also on iPhone
+          - { os: ubuntu-24.04, engine: chromium }
+          - { os: ubuntu-24.04, engine: firefox }
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with: { python-version: "3.12" }
+      - run: python -m pip install playwright
+      - run: python -m playwright install --with-deps ${{ matrix.engine }}
+      - run: python tests/web_check.py ${{ matrix.engine }}
