@@ -50,6 +50,14 @@ Mac: Beim ersten Start meldet macOS evtl. „nicht verifizierter Entwickler“. 
 
 ---
 
+## Im Browser (iPhone, iPad, Android, jeder Rechner)
+
+**[calyiex.github.io/pixelcut](https://calyiex.github.io/pixelcut/)** – dieselbe Engine läuft direkt im Browser (Pyodide/WebAssembly), nichts wird hochgeladen, nichts muss installiert werden. Bild auswählen, Winkel eintragen, Teile als ZIP speichern; zum Zusammensetzen alle Teile samt `parts.json` wieder auswählen. Auf iPhone/iPad in Safari ab iOS 16; beim ersten Öffnen werden ca. 40 MB geladen, danach liegt es im Cache. Nicht dabei: `trace`, `upscale`, `compare`, `key` (nur `split`, `join`, `alpha`).
+
+Bei jedem Commit prüft das CI die Seite in **WebKit (die Engine von Safari/iPhone), Chromium und Firefox**: Bild teilen, wieder zusammensetzen, Abweichung muss 0 sein. Das ist die Safari-Engine auf einem Mac-Rechner, kein echtes iPhone.
+
+---
+
 ## Installation
 
 ```bash
