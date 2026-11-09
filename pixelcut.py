@@ -27,7 +27,7 @@ from pathlib import Path
 
 import cv2
 import numpy as np
-from PIL import Image
+from PIL import Image, ImageOps
 
 
 PART_NAME = re.compile(r"part_\d+\.png")
@@ -78,7 +78,8 @@ def scratch_beside(path):
 
 def publish(pairs):
     """Replace several finished files at once: [(finished_file, destination), ...]. Existing destinations are moved aside first and
-    put back if anything goes wrong, so either all new files are in place or all old ones are."""
+    put back if anything goes wrong, so either all new files are in place or all old ones are. The aside folder is the truth about
+    what has to be restored (no bookkeeping that an abort could skip) and it is deleted only when it is empty again."""
     import tempfile
     for _, dest in pairs:
         if os.path.lexists(dest) and (link_like(dest) or not Path(dest).is_file()):
@@ -86,28 +87,50 @@ def publish(pairs):
         if Path(dest).exists() and not os.access(dest, os.W_OK):
             sys.exit("error: %s is read-only - nothing was changed" % dest)
     aside = Path(tempfile.mkdtemp(prefix=".pixelcut_", dir=Path(pairs[0][1]).resolve().parent))
-    done, kept = [], []
+    installed = []
     try:
         for i, (_, dest) in enumerate(pairs):
             if Path(dest).exists():
                 os.replace(dest, aside / str(i))
-                kept.append(i)
-        for i, (src, dest) in enumerate(pairs):
+        for src, dest in pairs:
+            installed.append(dest)                            # before the move: an abort in between must still clean up
             os.replace(src, dest)
-            done.append(i)
     except BaseException:
-        for i in done:
-            Path(pairs[i][1]).unlink(missing_ok=True)
-        for i in kept:
-            if (aside / str(i)).is_file():
-                os.replace(aside / str(i), pairs[i][1])
+        stuck = []
+        for dest in installed:
+            try:
+                Path(dest).unlink(missing_ok=True)
+            except OSError as e:
+                stuck.append("%s (%s)" % (dest, e))
+        for f in list(aside.iterdir()):
+            try:
+                os.replace(f, pairs[int(f.name)][1])
+            except OSError as e:
+                stuck.append("%s (%s)" % (pairs[int(f.name)][1], e))
+        if stuck:                                             # never destroy the only copy: say where it is
+            print("error: could not restore everything - your previous files are kept in %s\n  problem with: %s" % (aside, "; ".join(stuck)), file=sys.stderr)
+        else:
+            shutil.rmtree(aside, ignore_errors=True)
         raise
-    finally:
-        shutil.rmtree(aside, ignore_errors=True)
+    shutil.rmtree(aside, ignore_errors=True)
+
+
+def refuse_inputs(inputs, outputs):
+    """An output must never be one of the input files - writing it would destroy what is being read."""
+    ins = {Path(x).resolve() for x in inputs}
+    for o in outputs:
+        if Path(o).resolve() in ins:
+            sys.exit("error: %s is also an input - choose a different output file" % o)
+
+
+def need_folder_of(path):
+    if not Path(path).resolve().parent.is_dir():
+        sys.exit("error: the folder for %s does not exist" % path)
 
 
 def save_atomic(img, path):
     """Write beside the target, replace only when complete: an abort never leaves half a picture in place of a good one."""
+    need_folder_of(path)
     d, tmp = scratch_beside(path)
     try:
         img.save(tmp)
@@ -136,9 +159,23 @@ def write_journal(folder, names):
 
 
 # ----------------------------------------------------------------------------- helpers
+def open_upright(path):
+    """Image.open plus the camera's rotation: a phone photo is stored sideways with an 'Orientation' tag, viewers turn it - so do we
+    (with a notice), otherwise the result would not look like what the person sees."""
+    im = Image.open(path)
+    try:
+        orient = im.getexif().get(274, 1)
+    except Exception:
+        orient = 1
+    if orient not in (1, None, 0):
+        print("note: %s is rotated by its EXIF orientation tag (%s) - turned upright like a viewer shows it" % (path, orient), file=sys.stderr)
+        im = ImageOps.exif_transpose(im)
+    return im
+
+
 def load_rgb(path):
     """8-bit RGB. Transparency is composited over white and 16-bit data is scaled to 8 bit - both with a notice, never silently."""
-    im = Image.open(path)
+    im = open_upright(path)
     if im.width * im.height > 150_000_000:
         sys.exit("image too large (%d x %d = %d MP, limit 150 MP)" % (im.width, im.height, im.width * im.height // 1_000_000))
     if getattr(im, "n_frames", 1) > 1:
@@ -234,6 +271,7 @@ def fattest_point(mask):
 
 # ----------------------------------------------------------------------------- alpha
 def cmd_alpha(a):
+    refuse_inputs([a.input], [a.output])
     rgb = load_rgb(a.input)
     rgba = color_to_alpha(rgb)
     save_atomic(Image.fromarray(rgba, "RGBA"), a.output)
@@ -280,6 +318,7 @@ def split_sectors(shape, centre, angles, tooth, depth, gap, edge, region=None):
 
 
 def cmd_split(a):
+    refuse_inputs([a.input], [Path(a.outdir) / n for n in ["parts.json"] + ["part_%d.png" % k for k in range(64)]])
     rgb = load_rgb(a.input)
     h, w = rgb.shape[:2]
     rgba = np.dstack([rgb, np.full(rgb.shape[:2], 255, np.uint8)]) if a.opaque else color_to_alpha(rgb)
@@ -432,6 +471,7 @@ def cmd_split(a):
 
 # ----------------------------------------------------------------------------- key
 def cmd_key(a):
+    refuse_inputs([a.input], [Path(a.outdir) / n for n in ("base.png", "element.png", "preview.png")])
     rgb = load_rgb(a.input)
     h, w = rgb.shape[:2]
     try:
@@ -526,6 +566,7 @@ def cmd_join(a):
     shapes = {im.shape[:2] for im in ims}
     if len(shapes) != 1 or (size and (size[1], size[0]) not in shapes):
         sys.exit("the parts do not all have the same size%s" % (" as parts.json says" if size else ""))
+    refuse_inputs(files + [Path(a.parts) / "parts.json"], [a.output])
     out = over_white(ims)
     save_atomic(Image.fromarray(np.clip(out, 0, 255).round().astype(np.uint8)), a.output)
     print("joined %d parts -> %s" % (len(ims), a.output))
@@ -675,7 +716,7 @@ def ensure_esrgan():
 def lanczos_upscale(a, why):
     """Fallback without AI: plain Lanczos resize. Smooth, but no invented detail."""
     print("Real-ESRGAN not usable here (%s) - using plain Lanczos resize instead (no AI detail)." % why)
-    im = Image.open(a.input)
+    im = open_upright(a.input)
     im = im.convert("RGBA" if (im.mode in ("RGBA", "LA", "PA") or "transparency" in im.info) else "RGB")   # keep transparency
     save_atomic(im.resize((im.width * a.scale, im.height * a.scale), Image.LANCZOS), a.output)
     print("wrote", a.output)
@@ -687,6 +728,8 @@ def cmd_upscale(a):
     import subprocess
     if not 1 <= a.scale <= 8:
         sys.exit("--scale must be a whole number from 1 to 8")
+    refuse_inputs([a.input], [a.output])
+    need_folder_of(a.output)
     if a.no_ai:
         return lanczos_upscale(a, "--no-ai")
     exe = a.bin or ensure_esrgan()

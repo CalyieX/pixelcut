@@ -71,7 +71,7 @@
   <p><small>Open source (MIT): <a href="https://github.com/CalyieX/pixelcut">github.com/CalyieX/pixelcut</a> &middot; Support: <a href="https://ko-fi.com/kkwonderland">ko-fi.com/kkwonderland</a></small></p>
 </main>
 
-<script src="https://cdn.jsdelivr.net/pyodide/v0.27.7/full/pyodide.js"></script>
+<script src="https://cdn.jsdelivr.net/pyodide/v0.27.7/full/pyodide.js" integrity="sha384-90so5tCKvl0xs9agU29IMKlAVzhfzFX7QO//YxQkRhJG58bBZrFN+2ZTRB026X5X" crossorigin="anonymous"></script>
 <script>
 "use strict";
 const $ = (id) => document.getElementById(id);
@@ -127,13 +127,14 @@ function layout() {
 }
 $("cmd").addEventListener("change", layout);
 
-function clearResults() { const r = $("results"); r.hidden = true; r.replaceChildren(); }
+let blobUrls = [];
+function clearResults() { const r = $("results"); r.hidden = true; r.replaceChildren(); blobUrls.forEach((u) => URL.revokeObjectURL(u)); blobUrls = []; }
+function blobUrl(bytes, type) { const u = URL.createObjectURL(new Blob([bytes], { type })); blobUrls.push(u); return u; }
 function addImage(name, bytes, type) {
-  const url = URL.createObjectURL(new Blob([bytes], { type }));
-  const img = new Image(); img.src = url; img.alt = name; $("results").appendChild(img);
+  const img = new Image(); img.src = blobUrl(bytes, type); img.alt = name; $("results").appendChild(img);
 }
 function addDownload(name, bytes, type) {
-  const url = URL.createObjectURL(new Blob([bytes], { type }));
+  const url = blobUrl(bytes, type);
   const a = document.createElement("a"); a.className = "dl"; a.href = url; a.download = name; a.textContent = "Save " + name;
   $("results").appendChild(a);
 }
@@ -144,6 +145,23 @@ async function go() {
   const cmd = $("cmd").value;
   const files = Array.from($("files").files);
   if (!files.length) { status("Choose a picture first.", "bad"); return; }
+  if (cmd === "join") {
+    const names = files.map((f) => f.name);
+    const bad = names.filter((n) => !/^part_\d+\.png$/.test(n) && n !== "parts.json");
+    if (bad.length) { status("These files are not parts: " + bad.join(", ") + "\nChoose the files part_0.png, part_1.png, … and parts.json that the split gave you (the exact file names are needed).", "bad"); return; }
+    if (new Set(names).size !== names.length) { status("Some file names appear twice - choose each part once.", "bad"); return; }
+  } else {
+    for (const id of cmd === "split" ? ["depth", "tooth", "gap", "edge"] : []) {
+      const v = $(id).value.trim();
+      if (v === "" || !Number.isFinite(Number(v)) || Number(v) < 0) { status("Please enter a number (0 or more) in every number field.", "bad"); return; }
+    }
+    if (cmd === "split" && !/^\s*-?\d+(\.\d+)?(\s*,\s*-?\d+(\.\d+)?)*\s*$/.test($("angles").value)) { status("Angles must look like 45,135,225,315", "bad"); return; }
+    try {                                                           // the browser has far less memory than a computer: refuse early and clearly
+      const bmp = await createImageBitmap(files[0]);
+      const mp = bmp.width * bmp.height / 1e6; bmp.close();
+      if (mp > 20) { status("This picture is " + mp.toFixed(0) + " megapixels - too big for the browser version (limit 20). Use the downloadable program for large pictures, or shrink it first.", "bad"); return; }
+    } catch (_) { /* not decodable by the browser: pixelcut will say what is wrong */ }
+  }
   $("go").disabled = true; status("Working…");
   await new Promise((r) => setTimeout(r, 30));   // let the browser paint
   try {
@@ -156,10 +174,10 @@ async function go() {
     } else {
       const f = files[0];
       py.FS.writeFile("/work/in/input", new Uint8Array(await f.arrayBuffer()));
-      if (cmd === "alpha") argv = ["alpha", "/work/in/input", "/work/out/transparent.png", "--verify"];
+      if (cmd === "alpha") argv = ["alpha", "/work/in/input", "/work/out/transparent.png"];
       else {
         argv = ["split", "/work/in/input", "/work/out/parts", "--angles=" + $("angles").value.trim(),
-                "--depth", $("depth").value, "--tooth", $("tooth").value, "--gap", $("gap").value, "--edge", $("edge").value, "--verify"];
+                "--depth", $("depth").value, "--tooth", $("tooth").value, "--gap", $("gap").value, "--edge", $("edge").value];
         if ($("opaque").checked) argv.push("--opaque");
       }
     }

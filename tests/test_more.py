@@ -742,3 +742,85 @@ def test_key_never_deletes_a_folder_that_has_a_result_name(tmp_path):
     assert "not a plain file" in err
     assert (out / "base.png" / "mine.txt").read_text() == "keep me"
     assert not (out / "element.png").exists()
+
+
+def test_publish_interrupt_right_after_moving_an_old_file_aside_loses_nothing(tmp_path, monkeypatch):
+    import pixelcut
+    d = tmp_path / "p"
+    d.mkdir()
+    names = ["a", "b", "c"]
+    for n in names:
+        (d / n).write_text("old " + n)
+        (tmp_path / (n + ".new")).write_text("new " + n)
+    pairs = [(tmp_path / (n + ".new"), d / n) for n in names]
+    real = os.replace
+    for hit in range(1, 7):                                         # an interrupt AFTER the n-th real move, wherever it falls
+        for n in names:
+            (d / n).write_text("old " + n)
+            (tmp_path / (n + ".new")).write_text("new " + n)
+        calls = {"n": 0}
+
+        def flaky(a, b, calls=calls, hit=hit):
+            r = real(a, b)
+            calls["n"] += 1
+            if calls["n"] == hit:
+                raise KeyboardInterrupt
+            return r
+        monkeypatch.setattr(os, "replace", flaky)
+        try:
+            pixelcut.publish(pairs)
+        except KeyboardInterrupt:
+            pass
+        monkeypatch.undo()
+        state = {n: (d / n).read_text() if (d / n).exists() else None for n in names}
+        assert set(state.values()) in ({"old a", "old b", "old c"}, {"new a", "new b", "new c"}), (hit, state)
+        assert not list(d.glob(".pixelcut_*")) and not list(tmp_path.glob(".pixelcut_*")), hit
+
+
+def test_publish_keeps_the_old_files_when_the_rollback_itself_fails(tmp_path, monkeypatch, capsys):
+    import pixelcut
+    d = tmp_path / "q"
+    d.mkdir()
+    for n in ("a", "b"):
+        (d / n).write_text("old " + n)
+        (tmp_path / (n + ".new")).write_text("new " + n)
+    pairs = [(tmp_path / (n + ".new"), d / n) for n in ("a", "b")]
+    real, st = os.replace, {"n": 0}
+
+    def flaky(a, b):
+        st["n"] += 1
+        if st["n"] == 4:                                            # 2 moves aside, 1st install fine, 2nd install fails
+            raise OSError("install failed")
+        if st["n"] >= 5:                                            # ... and every restore fails (antivirus lock)
+            raise PermissionError("locked")
+        return real(a, b)
+    monkeypatch.setattr(os, "replace", flaky)
+    with pytest.raises(OSError):
+        pixelcut.publish(pairs)
+    monkeypatch.undo()
+    kept = list(d.glob(".pixelcut_*/*"))
+    assert {f.read_text() for f in kept} == {"old a", "old b"}      # the only copies of the old files still exist
+    assert "previous files are kept in" in capsys.readouterr().err
+
+
+def test_outputs_may_never_be_inputs(tmp_path):
+    Image.new("RGB", (10, 8), "red").save(tmp_path / "o.png")
+    keep = (tmp_path / "o.png").read_bytes()
+    assert "also an input" in fails("upscale", tmp_path / "o.png", tmp_path / "o.png", "--no-ai")
+    assert "also an input" in fails("alpha", tmp_path / "o.png", tmp_path / "o.png")
+    assert (tmp_path / "o.png").read_bytes() == keep
+    out = tmp_path / "pp"
+    cli("split", EX / "photo_cat.png", out, "--opaque", "--angles", "0,180", "--gap", "0", "--edge", "0")
+    assert "also an input" in fails("join", out, out / "part_0.png")
+    assert (out / "part_0.png").exists() and json.loads((out / "parts.json").read_text())["files"]
+    assert "does not exist" in fails("alpha", tmp_path / "o.png", tmp_path / "nope" / "x.png")
+
+
+def test_exif_rotation_is_applied_with_a_notice(tmp_path):
+    im = Image.new("RGB", (100, 40), "white")
+    ex = im.getexif()
+    ex[274] = 6                                                     # camera held upright: stored sideways, viewers turn it
+    im.save(tmp_path / "phone.jpg", exif=ex)
+    r = cli("alpha", tmp_path / "phone.jpg", tmp_path / "up.png")
+    assert "EXIF orientation" in r.stderr
+    assert Image.open(tmp_path / "up.png").size == (40, 100)
