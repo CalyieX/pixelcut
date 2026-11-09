@@ -4,12 +4,17 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "pixelcut"
-version = "1.6.2"
+version = "1.6.3"
 description = "K&K pixelcut - cut a picture into parts without changing a single pixel"
 readme = "README.md"
 license = { text = "MIT" }
 requires-python = ">=3.9"
 dependencies = ["numpy>=1.23,<3", "opencv-python-headless>=4.7,<5", "Pillow>=9.5,<13", "scikit-image>=0.20,<1", "vtracer>=0.6,<1"]
+
+[project.urls]
+Homepage = "https://github.com/CalyieX/pixelcut"
+Browser = "https://calyiex.github.io/pixelcut/"
+Issues = "https://github.com/CalyieX/pixelcut/issues"
 
 [project.optional-dependencies]
 test = ["pytest"]

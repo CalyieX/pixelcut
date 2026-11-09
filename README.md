@@ -4,7 +4,7 @@
 
 [![Unterstützen auf Ko-fi](https://ko-fi.com/img/githubbutton_sm.svg)](https://ko-fi.com/kkwonderland)
 
-**English in short:** a small command-line tool that cuts an image into wedge-shaped parts (free angles, straight or **zig-zag** edges) **without altering a single pixel**, turns a white background into real transparency (exact colour-to-alpha), lifts a word or element out and re-places it, and writes **hit-area polygons** for touch menus. Parts put back together over white give the original back (max deviation <= 1/255, measured with `--verify` and `compare`). It does *not* generate or redraw images and does not upscale without inventing pixels. Works on drawings and photos. Details below (German).
+**English in short:** a small command-line tool that cuts an image into wedge-shaped parts (free angles, straight or **zig-zag** edges; also grids, strips and any shape from a label map) **without altering a single pixel**, turns a white background into real transparency (exact colour-to-alpha), lifts a word or element out and re-places it, and writes **hit-area polygons** for touch menus. Parts put back together over white give the original back (max deviation <= 1/255, measured with `--verify` and `compare`). It does *not* generate or redraw images and does not upscale without inventing pixels. Works on drawings and photos. Details below (German).
 
 **Ein Bild in Teile zerlegen, ohne ein einziges Pixel zu verändern.**
 *Cut a picture into parts without changing a single pixel.*
@@ -60,6 +60,15 @@ Bei jedem Commit prüft das CI die Seite in **WebKit (die Engine von Safari/iPho
 
 ## Installation
 
+Am einfachsten von PyPI (Windows, Mac, Linux, Python ab 3.9), danach gibt es den Befehl `pixelcut`:
+
+```bash
+pip install pixelcut
+pixelcut --version
+```
+
+Oder aus dem Quelltext:
+
 ```bash
 git clone https://github.com/CalyieX/pixelcut
 cd pixelcut
@@ -83,7 +92,7 @@ pixelcut.join("teile", "zurueck.png")
 print(pixelcut.compare("bild.png", "zurueck.png"))   # {'ssim': 1.0, 'mean_diff': 0.0, 'max_diff': 0.0}
 ```
 
-Funktionen: `alpha`, `split`, `join`, `key`, `compare`, `trace`, `upscale`. Optionen heißen wie die Kommandozeilen-Flags, Bindestriche als Unterstriche (`only_inside=True`). Dieselben Prüfungen und Standardwerte wie in der Kommandozeile, nichts wird gedruckt, Fehler werden zu `pixelcut.PixelcutError`.
+Funktionen: `alpha`, `split`, `labels`, `join`, `key`, `compare`, `trace`, `upscale`. Hinweis: Die Schnittstelle leitet während eines Aufrufs die Ausgabe des ganzen Prozesses um; in mehreren Threads gleichzeitig benutzen verschluckt fremde `print`-Zeilen. `verify` hat über die Schnittstelle keine Wirkung (die Zahlen werden nicht ausgegeben), nutze `compare`. Optionen heißen wie die Kommandozeilen-Flags, Bindestriche als Unterstriche (`only_inside=True`). Dieselben Prüfungen und Standardwerte wie in der Kommandozeile, nichts wird gedruckt, Fehler werden zu `pixelcut.PixelcutError`.
 
 ## Was pixelcut kann
 
@@ -214,7 +223,7 @@ pip install -e ".[test]"
 pytest -q
 ```
 
-158 Tests. Sie prüfen die gespeicherten Dateien: Rundlauf split + join ist exakt (Zeichnung, Foto, gerade und Zickzack), die Teile überlappen nicht, Polygone, Winkel, Mitte, Größe und dickster Punkt stimmen mit den Teilen überein, `compare`, `key` und `alpha` rechnen richtig, `join` verweigert fehlende oder falsch große Teile, `split` fasst fremde Dateien nicht an, und schlechte Eingaben ergeben eine klare Fehlerzeile. Eingebaute Fehler (Mutationen) werden gefangen.
+162 Tests. Sie prüfen die gespeicherten Dateien: Rundlauf split + join ist exakt (Zeichnung, Foto, gerade und Zickzack), die Teile überlappen nicht, Polygone, Winkel, Mitte, Größe und dickster Punkt stimmen mit den Teilen überein, `compare`, `key` und `alpha` rechnen richtig, `join` verweigert fehlende oder falsch große Teile, `split` fasst fremde Dateien nicht an, und schlechte Eingaben ergeben eine klare Fehlerzeile. Eingebaute Fehler (Mutationen) werden gefangen.
 
 ---
 

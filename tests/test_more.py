@@ -730,7 +730,7 @@ def test_key_interrupt_during_publish_restores_the_old_set(tmp_path, monkeypatch
 
 def test_web_copy_is_the_same_file():
     root = Path(__file__).parent.parent
-    assert (root / "docs" / "pixelcut.py").read_bytes() == (root / "pixelcut.py").read_bytes(), "run: copy pixelcut.py docs\pixelcut.py"
+    assert (root / "docs" / "pixelcut.py").read_bytes() == (root / "pixelcut.py").read_bytes(), "run: copy pixelcut.py docs/pixelcut.py"
 
 
 def test_key_never_deletes_a_folder_that_has_a_result_name(tmp_path):
@@ -1016,3 +1016,42 @@ def test_api_negative_angles_quiet_and_clean_errors(tmp_path, capsys):
     with pytest.raises(pixelcut.PixelcutError):
         pixelcut.compare(tmp_path / "missing.png", tmp_path / "t.png")
     assert type(pixelcut.compare(tmp_path / "t.png", tmp_path / "t.png")["ssim"]) is float
+
+
+def test_join_refuses_lossy_output_and_foreign_zero_padded_parts(tmp_path):
+    import pixelcut
+    Image.fromarray((np.random.RandomState(4).rand(20, 30, 3) * 255).astype("uint8")).save(tmp_path / "o.png")
+    pixelcut.split(tmp_path / "o.png", tmp_path / "p", grid="2x1", opaque=True)
+    for bad in ("back.jpg", "back.webp", "back"):
+        with pytest.raises(pixelcut.PixelcutError, match="lossless"):
+            pixelcut.join(tmp_path / "p", tmp_path / bad)
+        assert not (tmp_path / bad).exists()
+    Image.new("RGB", (30, 20), "black").save(tmp_path / "p" / "part_01.png")      # not a name split writes
+    (tmp_path / "p" / "parts.json").unlink()
+    pixelcut.join(tmp_path / "p", tmp_path / "ok.png")
+    assert pixelcut.compare(tmp_path / "o.png", tmp_path / "ok.png")["max_diff"] == 0
+
+
+def test_lossy_label_map_is_refused(tmp_path):
+    import pixelcut
+    Image.new("RGB", (40, 40), "red").save(tmp_path / "o.png")
+    Image.new("L", (40, 40), 0).save(tmp_path / "m.jpg", quality=90)
+    with pytest.raises(pixelcut.PixelcutError, match="lossy"):
+        pixelcut.split(tmp_path / "o.png", tmp_path / "x", from_labels=tmp_path / "m.jpg")
+
+
+def test_version_flag_matches_pyproject_and_ignored_flags_are_announced(tmp_path):
+    import pixelcut
+    root = Path(__file__).resolve().parent.parent
+    assert 'version = "%s"' % pixelcut.__version__ in (root / "pyproject.toml").read_text(encoding="utf-8")
+    assert pixelcut.__version__ in cli("--version").stdout
+    Image.new("RGB", (40, 40), "red").save(tmp_path / "o.png")
+    r = cli("split", tmp_path / "o.png", tmp_path / "g", "--grid", "2x2", "--gap", "20", "--centre", "5,5")
+    assert "--centre, --gap ignored with --grid" in r.stderr
+
+
+def test_fully_opaque_rgba_gives_no_transparency_note(tmp_path):
+    Image.new("RGBA", (10, 10), (255, 0, 0, 255)).save(tmp_path / "solid.png")
+    Image.new("RGBA", (10, 10), (255, 0, 0, 100)).save(tmp_path / "see.png")
+    assert "transparency" not in cli("alpha", tmp_path / "solid.png", tmp_path / "a.png").stderr
+    assert "transparency" in cli("alpha", tmp_path / "see.png", tmp_path / "b.png").stderr

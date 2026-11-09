@@ -32,7 +32,9 @@ import numpy as np
 from PIL import Image, ImageOps
 
 
-PART_NAME = re.compile(r"part_\d+\.png")
+__version__ = "1.6.3"
+PART_NAME = re.compile(r"part_(0|[1-9]\d*)\.png")                  # exactly the names split writes: no leading zeros
+LOSSLESS = (".png", ".tif", ".tiff")
 
 
 def manifest_files(m):
@@ -234,8 +236,9 @@ def load_rgb(path):
         top = 65535.0 if im.mode.startswith("I;16") else max(arr.max(), 1.0)
         return np.dstack([np.clip(arr / top * 255 + 0.5, 0, 255).astype(np.uint8)] * 3)
     if im.mode in ("RGBA", "LA", "PA") or "transparency" in im.info:                      # includes L/RGB with a PNG colour key
-        print("note: %s has transparency - composited over white" % path, file=sys.stderr)
         im = im.convert("RGBA")
+        if im.getchannel("A").getextrema()[0] < 255:                                      # a fully opaque RGBA is no news
+            print("note: %s has transparency - composited over white" % path, file=sys.stderr)
         bg = Image.new("RGBA", im.size, (255, 255, 255, 255))
         im = Image.alpha_composite(bg, im)
     return np.array(im.convert("RGB"))
@@ -389,6 +392,8 @@ def read_label_map(path, w, h):
         im.load()
     except Exception as e:
         sys.exit("--from-labels: cannot read %s (%s)" % (path, (str(e).strip().splitlines() or [type(e).__name__])[0]))
+    if im.format in ("JPEG", "MPO", "WEBP"):
+        sys.exit("--from-labels: %s is lossy (%s) - its grey values are not the part numbers any more; save the map as PNG" % (path, im.format))
     if im.mode in ("RGB", "RGBA", "LA", "F", "CMYK", "YCbCr", "LAB", "HSV"):
         sys.exit("--from-labels needs a grey picture (one number per pixel), not a colour one - %s is %s" % (path, im.mode))
     if im.size != (w, h):
@@ -407,7 +412,7 @@ def read_label_map(path, w, h):
 def cmd_labels(a):
     refuse_inputs([a.input], [a.output])
     need_folder_of(a.output)
-    if Path(a.output).suffix.lower() not in (".png", ".tif", ".tiff"):
+    if Path(a.output).suffix.lower() not in LOSSLESS:
         sys.exit("error: a label map must be saved lossless as .png or .tif - JPEG would change the part numbers, BMP cannot hold more than 256 parts")
     w, h = open_upright(a.input).size
     cols, rows = parse_grid(a.grid, w, h)
@@ -427,6 +432,12 @@ def cmd_split(a):
     grid = parse_grid(a.grid, w, h) if a.grid else None
     labelled = read_label_map(a.from_labels, w, h) if a.from_labels else None
     exact = bool(grid or labelled)                            # cells / label parts are exact by construction: no slit, no ink edge
+    if exact:
+        ignored = [f for f, v, d in (("--centre", a.centre, "auto"), ("--angles", a.angles, "45,135,225,315"), ("--gap", a.gap, 2.6),
+                                     ("--edge", a.edge, 3.2), ("--depth", a.depth, 9.0), ("--tooth", a.tooth, 18.0),
+                                     ("--only-inside", a.only_inside, False)) if v != d]
+        if ignored:
+            print("note: %s ignored with %s (the parts are cut exactly, without slit)" % (", ".join(ignored), "--grid" if grid else "--from-labels"), file=sys.stderr)
     nparts = grid[0] * grid[1] if grid else labelled[1] if labelled else None
     rgba = np.dstack([rgb, np.full(rgb.shape[:2], 255, np.uint8)]) if a.opaque else color_to_alpha(rgb)
     if rgba[:, :, 3].max() == 0:                              # no pixel has any alpha: there is literally nothing to cut
@@ -688,6 +699,8 @@ def cmd_join(a):
     if len(shapes) != 1 or (size and (size[1], size[0]) not in shapes):
         sys.exit("the parts do not all have the same size%s" % (" as parts.json says" if size else ""))
     refuse_inputs(files + [Path(a.parts) / "parts.json"], [a.output])
+    if Path(a.output).suffix.lower() not in LOSSLESS + (".bmp",):
+        sys.exit("error: join must write a lossless picture (.png, .tif or .bmp) - %s would change pixels, the rebuild is only exact lossless" % (Path(a.output).suffix or "this format"))
     out = over_white(np.array(Image.open(f).convert("RGBA")) for f in files)
     save_atomic(Image.fromarray(np.clip(out, 0, 255).round().astype(np.uint8)), a.output)
     print("joined %d parts -> %s" % (len(files), a.output))
@@ -887,6 +900,7 @@ class _ApiParser(argparse.ArgumentParser):
 
 def build_parser(parser_class=argparse.ArgumentParser):
     p = parser_class(prog="pixelcut", description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+    p.add_argument("--version", action="version", version="pixelcut " + __version__)
     sub = p.add_subparsers(dest="cmd", required=True)
 
     s = sub.add_parser("alpha", help="white background -> transparent, exact over white")
@@ -1074,7 +1088,7 @@ def upscale(input, output, **options):
     return Path(output)
 
 
-__all__ = ["PixelcutError", "alpha", "split", "labels", "join", "key", "compare", "trace", "upscale"]
+__all__ = ["__version__", "PixelcutError", "alpha", "split", "labels", "join", "key", "compare", "trace", "upscale"]
 
 
 if __name__ == "__main__":
