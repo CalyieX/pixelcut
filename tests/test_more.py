@@ -601,8 +601,8 @@ def test_unprintable_characters_in_a_path_do_not_fail_the_job(tmp_path):
     target = tmp_path / "Prüfung 空 Rundlauf"
     env = dict(os.environ, PYTHONIOENCODING="cp1252")
     r = subprocess.run([sys.executable, str(Path(__file__).parent.parent / "pixelcut.py"), "split", str(EX / "photo_cat.png"), str(target),
-                        "--opaque", "--angles", "0,180", "--gap", "0", "--edge", "0"], capture_output=True, text=True, env=env)
-    assert r.returncode == 0, r.stderr
+                        "--opaque", "--angles", "0,180", "--gap", "0", "--edge", "0"], capture_output=True, env=env)   # bytes: the console is cp1252 on purpose
+    assert r.returncode == 0, r.stderr.decode("cp1252", "replace")
     assert (target / "parts.json").exists()
 
 
