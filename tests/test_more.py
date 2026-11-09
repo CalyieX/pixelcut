@@ -950,21 +950,59 @@ def test_labels_refuses_lossy_formats(tmp_path):
     assert not (tmp_path / "m.jpg").exists()
 
 
+def _png_with_exif(path, arr16, orient):
+    """Real 16-bit RGB PNG with an EXIF orientation: Pillow cannot write 16-bit RGB, so the eXIf chunk is inserted by hand."""
+    import struct
+    import zlib
+    cv2.imencode(".png", arr16)[1].tofile(str(path))
+    ex = Image.Exif()
+    ex[274] = orient
+    payload = ex.tobytes()
+    payload = payload[6:] if payload.startswith(b"Exif\x00\x00") else payload
+    chunk = struct.pack(">I", len(payload)) + b"eXIf" + payload + struct.pack(">I", zlib.crc32(b"eXIf" + payload) & 0xffffffff)
+    raw = Path(path).read_bytes()
+    cut = 8 + 4 + 4 + 13 + 4                                      # signature + IHDR chunk
+    Path(path).write_bytes(raw[:cut] + chunk + raw[cut:])
+
+
 def test_exif_rotation_also_for_16_bit_png(tmp_path):
     import pixelcut
     for orient in (2, 3, 4, 5, 6, 7, 8):
         a16 = (np.arange(6 * 10 * 3).reshape(6, 10, 3) * 300).astype(np.uint16)
-        import cv2
-        cv2.imencode(".png", a16)[1].tofile(str(tmp_path / "raw.png"))
-        im = Image.open(tmp_path / "raw.png")
-        ex = Image.Exif()
-        ex[274] = orient
-        im.save(tmp_path / "e.png", exif=ex)
-        want = np.array(ImageOps.exif_transpose(Image.open(tmp_path / "e.png").convert("RGB")))
+        _png_with_exif(tmp_path / "e.png", a16, orient)
+        assert cv2.imdecode(np.fromfile(str(tmp_path / "e.png"), np.uint8), cv2.IMREAD_UNCHANGED).dtype == np.uint16   # really 16 bit
+        want = np.array(ImageOps.exif_transpose(Image.open(tmp_path / "e.png")).convert("RGB"))
         got = pixelcut.load_rgb(tmp_path / "e.png")
         assert got.shape == want.shape, orient
         pixelcut.labels(tmp_path / "e.png", tmp_path / "m.png", grid="2x2")
         pixelcut.split(tmp_path / "e.png", tmp_path / ("s%d" % orient), from_labels=tmp_path / "m.png", opaque=True)
+
+
+def test_part_names_beyond_1023_are_protected_and_bmp_labels_refused(tmp_path):
+    import pixelcut
+    out = tmp_path / "o"
+    out.mkdir()
+    Image.new("RGB", (30, 20), "red").save(out / "part_1024.png")
+    with pytest.raises(pixelcut.PixelcutError, match="split writes"):
+        pixelcut.split(out / "part_1024.png", out, grid="2x2")
+    assert (out / "part_1024.png").exists()
+    Image.new("RGB", (40, 40), "red").save(tmp_path / "o.png")
+    with pytest.raises(pixelcut.PixelcutError, match="lossless"):
+        pixelcut.labels(tmp_path / "o.png", tmp_path / "m.bmp", grid="2x2")
+    with pytest.raises(pixelcut.PixelcutError, match="at most"):
+        pixelcut.split(tmp_path / "o.png", tmp_path / "w", angles=list(range(1025)), opaque=True)
+
+
+def test_compare_bomb_is_a_pixelcut_error(tmp_path):
+    import pixelcut
+    Image.new("RGB", (20, 20), "red").save(tmp_path / "o.png")
+    old = Image.MAX_IMAGE_PIXELS
+    Image.MAX_IMAGE_PIXELS = 10
+    try:
+        with pytest.raises(pixelcut.PixelcutError):
+            pixelcut.compare(tmp_path / "o.png", tmp_path / "o.png")
+    finally:
+        Image.MAX_IMAGE_PIXELS = old
 
 
 def test_api_negative_angles_quiet_and_clean_errors(tmp_path, capsys):

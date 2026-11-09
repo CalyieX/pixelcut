@@ -131,6 +131,8 @@ def refuse_inputs_in_workfolders(inputs, outdir):
     work = [(Path(outdir) / n).resolve() for n in (DONE, ".pixelcut_old", ".pixelcut_new")]
     for x in inputs:
         rx = Path(x).resolve()
+        if rx.parent == Path(outdir).resolve() and (PART_NAME.fullmatch(rx.name) or rx.name == "parts.json"):
+            sys.exit("error: %s is one of the files split writes into %s - choose a different input" % (x, outdir))
         for wf in work:
             if rx == wf or wf in rx.parents:
                 sys.exit("error: %s lies in %s, a work folder of pixelcut - move the picture elsewhere" % (x, wf))
@@ -405,8 +407,8 @@ def read_label_map(path, w, h):
 def cmd_labels(a):
     refuse_inputs([a.input], [a.output])
     need_folder_of(a.output)
-    if Path(a.output).suffix.lower() not in (".png", ".tif", ".tiff", ".bmp"):
-        sys.exit("error: a label map must be saved lossless (.png, .tif or .bmp) - JPEG would change the part numbers")
+    if Path(a.output).suffix.lower() not in (".png", ".tif", ".tiff"):
+        sys.exit("error: a label map must be saved lossless as .png or .tif - JPEG would change the part numbers, BMP cannot hold more than 256 parts")
     w, h = open_upright(a.input).size
     cols, rows = parse_grid(a.grid, w, h)
     ids = grid_cells((h, w), cols, rows)
@@ -453,6 +455,8 @@ def cmd_split(a):
             angles = [v % 360.0 for v in angles]              # 360 means 0, -90 means 270
         except ValueError:
             sys.exit("--angles must be numbers separated by commas, e.g. 32,148,214,327")
+        if len(angles) > MAX_PARTS:
+            sys.exit("--angles: at most %d parts" % MAX_PARTS)
         if len(angles) < 2 or len({round(v % 360, 6) for v in angles}) != len(angles):
             sys.exit("--angles needs at least two different angles")
     for flag, value in (("--gap", a.gap), ("--edge", a.edge), ("--depth", a.depth), ("--tooth", a.tooth)):
@@ -983,19 +987,23 @@ def _flags(opts):
 def _run(cmd, positional, opts):
     import contextlib
     import io
-    out = io.StringIO()
+    out, err = io.StringIO(), io.StringIO()
+
+    def hint(message):                                        # "your previous files are kept in ..." must not be swallowed
+        extra = [ln for ln in err.getvalue().splitlines() if ln.startswith("error:") or "kept in" in ln]
+        return message + ("\n" + "\n".join(extra) if extra else "")
     try:
-        with contextlib.redirect_stdout(out), contextlib.redirect_stderr(io.StringIO()):   # the API prints nothing, notes included
+        with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):   # the API prints nothing, notes included
             a = build_parser(_ApiParser).parse_args([cmd] + [str(x) for x in positional] + _flags(opts))
             a.fn(a)
     except SystemExit as e:
         if e.code in (None, 0):
             return out.getvalue()
-        raise PixelcutError(str(e.code).removeprefix("error: ")) from None
+        raise PixelcutError(hint(str(e.code).removeprefix("error: "))) from None
     except (KeyboardInterrupt, PixelcutError):
         raise
     except BaseException as e:                                # same net as the command line (pyo3 panics are not Exceptions)
-        raise PixelcutError((str(e).strip().splitlines() or [type(e).__name__])[0]) from e
+        raise PixelcutError(hint((str(e).strip().splitlines() or [type(e).__name__])[0])) from e
     return out.getvalue()
 
 
@@ -1046,7 +1054,9 @@ def compare(first, second, resize=False):
                 y = cv2.resize(y, (x.shape[1], x.shape[0]), interpolation=cv2.INTER_AREA)
     except SystemExit as e:
         raise PixelcutError(str(e.code).removeprefix("error: ")) from None
-    except OSError as e:                                      # missing / unreadable / not a picture
+    except (KeyboardInterrupt, PixelcutError):
+        raise
+    except Exception as e:                                    # missing / unreadable / not a picture / decompression bomb
         raise PixelcutError("cannot read the picture: %s" % (str(e).strip().splitlines() or [type(e).__name__])[0]) from e
     ss, mean, mx = measure(x, y)
     return {"ssim": float(ss), "mean_diff": float(mean), "max_diff": float(mx)}

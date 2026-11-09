@@ -176,10 +176,11 @@ async function go() {
       argv = ["join", "/work/in", "/work/out/joined.png"];
     } else {
       const f = files[0];
-      py.FS.writeFile("/work/in/input", new Uint8Array(await f.arrayBuffer()));
-      if (cmd === "alpha") argv = ["alpha", "/work/in/input", "/work/out/transparent.png"];
+      const inp = "/work/in/input" + ((f.name.match(/\.(png|tif|tiff|jpe?g|bmp|webp|gif)$/i) || [""])[0].toLowerCase());   // keep the extension: 16-bit PNG/TIFF need it
+      py.FS.writeFile(inp, new Uint8Array(await f.arrayBuffer()));
+      if (cmd === "alpha") argv = ["alpha", inp, "/work/out/transparent.png"];
       else {
-        argv = ["split", "/work/in/input", "/work/out/parts", "--angles=" + $("angles").value.trim(),
+        argv = ["split", inp, "/work/out/parts", "--angles=" + $("angles").value.trim(),
                 ...($("grid").value.trim() ? ["--grid=" + $("grid").value.trim().replace(/\s+/g, "")] : []),
                 "--depth", $("depth").value, "--tooth", $("tooth").value, "--gap", $("gap").value, "--edge", $("edge").value];
         if ($("opaque").checked) argv.push("--opaque");
