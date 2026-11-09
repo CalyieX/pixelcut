@@ -731,3 +731,14 @@ def test_key_interrupt_during_publish_restores_the_old_set(tmp_path, monkeypatch
 def test_web_copy_is_the_same_file():
     root = Path(__file__).parent.parent
     assert (root / "docs" / "pixelcut.py").read_bytes() == (root / "pixelcut.py").read_bytes(), "run: copy pixelcut.py docs\pixelcut.py"
+
+
+def test_key_never_deletes_a_folder_that_has_a_result_name(tmp_path):
+    k = _key_input(tmp_path)
+    out = tmp_path / "ko"
+    (out / "base.png").mkdir(parents=True)
+    (out / "base.png" / "mine.txt").write_text("keep me")
+    err = fails("key", k, out, "--box", "10,10,70,50")
+    assert "not a plain file" in err
+    assert (out / "base.png" / "mine.txt").read_text() == "keep me"
+    assert not (out / "element.png").exists()

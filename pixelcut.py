@@ -81,6 +81,8 @@ def publish(pairs):
     put back if anything goes wrong, so either all new files are in place or all old ones are."""
     import tempfile
     for _, dest in pairs:
+        if os.path.lexists(dest) and (link_like(dest) or not Path(dest).is_file()):
+            sys.exit("error: %s exists and is not a plain file (folder or link) - nothing was changed" % dest)
         if Path(dest).exists() and not os.access(dest, os.W_OK):
             sys.exit("error: %s is read-only - nothing was changed" % dest)
     aside = Path(tempfile.mkdtemp(prefix=".pixelcut_", dir=Path(pairs[0][1]).resolve().parent))
