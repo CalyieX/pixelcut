@@ -582,3 +582,24 @@ def test_empty_part_has_no_fattest_point(tmp_path):
     cli("split", tmp_path / "w.png", tmp_path / "o", "--angles", "0,180", "--gap", "0", "--edge", "0")
     m = json.loads((tmp_path / "o" / "parts.json").read_text())
     assert all(x["fattest_point"] is None and x["polygon"] == [] for x in m["parts"])
+
+
+@pytest.mark.parametrize("scratch", [".pixelcut_new", ".pixelcut_done", ".pixelcut_old"])
+def test_a_folder_named_like_a_part_is_foreign(tmp_path, scratch):
+    out = tmp_path / "s"
+    out.mkdir()
+    sub = out / scratch / "part_0.png"                             # a DIRECTORY with a part name, holding someone's file
+    sub.mkdir(parents=True)
+    (sub / "foreign.txt").write_text("keep me")
+    assert "pixelcut" in fails("split", EX / "photo_cat.png", out, "--opaque", "--angles", "0,180")
+    assert (sub / "foreign.txt").read_text() == "keep me"
+
+
+def test_unprintable_characters_in_a_path_do_not_fail_the_job(tmp_path):
+    import os
+    target = tmp_path / "Prüfung 空 Rundlauf"
+    env = dict(os.environ, PYTHONIOENCODING="cp1252")
+    r = subprocess.run([sys.executable, str(Path(__file__).parent.parent / "pixelcut.py"), "split", str(EX / "photo_cat.png"), str(target),
+                        "--opaque", "--angles", "0,180", "--gap", "0", "--edge", "0"], capture_output=True, text=True, env=env)
+    assert r.returncode == 0, r.stderr
+    assert (target / "parts.json").exists()

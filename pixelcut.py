@@ -53,6 +53,17 @@ def manifest_files(m):
 
 
 JOURNAL = ".journal.json"
+
+
+def foreign_entries(folder, extra=()):
+    """Names in a pixelcut scratch/backup folder that pixelcut did not put there. Only plain files with pixelcut's own
+    names count as ours - a directory or a link called part_0.png is foreign, whatever it is named."""
+    bad = []
+    for f in folder.iterdir():
+        own = (PART_NAME.fullmatch(f.name) or f.name in ("parts.json", JOURNAL, JOURNAL + ".tmp") or f.name in extra)
+        if not own or f.is_symlink() or not f.is_file():
+            bad.append(f.name)
+    return bad
 DONE = ".pixelcut_done"
 
 
@@ -259,12 +270,12 @@ def cmd_split(a):
     out = Path(a.outdir)
     out.mkdir(parents=True, exist_ok=True)
     if (out / DONE).is_dir():                                 # the swap had finished, only the clean-up was interrupted
-        if any(not (PART_NAME.fullmatch(f.name) or f.name in ("parts.json", JOURNAL, JOURNAL + ".tmp")) for f in (out / DONE).iterdir()):
+        if foreign_entries(out / DONE):
             sys.exit("%s holds files pixelcut did not put there - check and remove it first" % (out / DONE))
         shutil.rmtree(out / DONE)
     leftover = out / ".pixelcut_old"                          # an earlier run was interrupted while swapping: its old set is the only full copy
     if leftover.is_dir():
-        strange = [f.name for f in leftover.iterdir() if not (PART_NAME.fullmatch(f.name) or f.name in ("parts.json", JOURNAL, JOURNAL + ".tmp"))]
+        strange = foreign_entries(leftover)
         if strange:
             sys.exit("%s holds files pixelcut did not put there (%s) - check and remove it first" % (leftover, ", ".join(strange)))
         journal = leftover / JOURNAL
@@ -294,7 +305,7 @@ def cmd_split(a):
         sys.exit("%s already exists in %s and was not written by pixelcut - use an empty folder" % (", ".join(clash), out))
     staging = out / ".pixelcut_new"                           # everything is written here first, replacing happens only when all parts worked
     if staging.exists():
-        if any(not (PART_NAME.fullmatch(f.name) or f.name == "parts.json") for f in staging.iterdir()):
+        if foreign_entries(staging):
             sys.exit("%s exists and does not look like pixelcut's own scratch folder - remove it first" % staging)
         shutil.rmtree(staging)
     staging.mkdir()
@@ -610,6 +621,11 @@ def cmd_upscale(a):
 
 # ----------------------------------------------------------------------------- cli
 def main(argv=None):
+    for stream in (sys.stdout, sys.stderr):                   # a path with characters the console cannot show must not turn a finished job into an error
+        try:
+            stream.reconfigure(errors="backslashreplace")
+        except (AttributeError, ValueError):
+            pass
     p = argparse.ArgumentParser(prog="pixelcut", description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     sub = p.add_subparsers(dest="cmd", required=True)
 

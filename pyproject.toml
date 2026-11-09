@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "pixelcut"
-version = "1.2.8"
+version = "1.2.9"
 description = "K&K pixelcut - cut a picture into parts without changing a single pixel"
 readme = "README.md"
 license = { text = "MIT" }
