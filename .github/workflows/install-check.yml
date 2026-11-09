@@ -1,0 +1,31 @@
+name: install-check
+on:
+  workflow_dispatch:
+jobs:
+  pip:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, macos-13, windows-latest]
+        python: ["3.9", "3.12"]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python }}
+      - name: install from PyPI and run an exact round trip
+        shell: bash
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install pixelcut
+          python - <<'PY'
+          import numpy as np
+          from PIL import Image
+          rng = np.random.RandomState(1)
+          Image.fromarray((rng.rand(61, 97, 3) * 255).astype("uint8")).save("o.png")
+          PY
+          pixelcut labels o.png map.png --grid 5x4
+          pixelcut split o.png parts --from-labels map.png --opaque
+          pixelcut join parts back.png
+          pixelcut compare o.png back.png | tee out.txt
+          grep -q "max |diff| 0" out.txt
