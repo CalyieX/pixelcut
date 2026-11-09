@@ -656,7 +656,7 @@ def test_upscale_abort_keeps_the_existing_result(tmp_path, monkeypatch):
     real = Image.Image.save
 
     def partial(self, fp, *a, **k):
-        if Path(str(fp)).name.startswith(".pixelcut_tmp_"):
+        if Path(str(fp)).parent.name.startswith(".pixelcut_"):                # the private scratch folder beside the target
             Path(fp).write_bytes(b"PARTIAL PNG")
             raise KeyboardInterrupt
         return real(self, fp, *a, **k)
@@ -665,7 +665,7 @@ def test_upscale_abort_keeps_the_existing_result(tmp_path, monkeypatch):
     with pytest.raises(KeyboardInterrupt):
         pixelcut.main()
     assert good.read_bytes() == keep
-    assert not list(tmp_path.glob(".pixelcut_tmp_*"))
+    assert not list(tmp_path.glob(".pixelcut_*"))
 
 
 def test_trace_refuses_same_input_and_output(tmp_path):
@@ -674,3 +674,55 @@ def test_trace_refuses_same_input_and_output(tmp_path):
     assert "different file" in fails("trace", tmp_path / "x.png", tmp_path / "x.png")
     assert (tmp_path / "x.png").read_bytes() == keep
     assert "different file" in fails("trace", tmp_path / "x.png", tmp_path / "x.svg", "--render", tmp_path / "x.svg")
+
+
+def test_a_file_named_like_the_old_temp_name_survives(tmp_path):
+    Image.new("RGB", (8, 8), "white").save(tmp_path / ".pixelcut_tmp_r.png")
+    keep = (tmp_path / ".pixelcut_tmp_r.png").read_bytes()
+    cli("alpha", tmp_path / ".pixelcut_tmp_r.png", tmp_path / "r.png")
+    assert (tmp_path / ".pixelcut_tmp_r.png").read_bytes() == keep
+
+
+def _key_input(tmp_path):
+    img = np.full((60, 80, 3), 235, np.uint8)
+    img[20:40, 30:50] = (200, 30, 30)
+    Image.fromarray(img).save(tmp_path / "k.png")
+    return tmp_path / "k.png"
+
+
+def test_key_refuses_read_only_results_before_touching_anything(tmp_path):
+    import stat
+    k = _key_input(tmp_path)
+    out = tmp_path / "ko"
+    cli("key", k, out, "--box", "10,10,70,50")
+    before = {f.name: f.read_bytes() for f in out.iterdir()}
+    (out / "element.png").chmod(stat.S_IREAD)
+    try:
+        err = fails("key", k, out, "--box", "10,10,70,50", "--scale", "0.8")
+        assert "read-only" in err
+        assert {f.name: f.read_bytes() for f in out.iterdir()} == before
+    finally:
+        (out / "element.png").chmod(stat.S_IWRITE | stat.S_IREAD)
+
+
+def test_key_interrupt_during_publish_restores_the_old_set(tmp_path, monkeypatch):
+    import pixelcut
+    k = _key_input(tmp_path)
+    out = tmp_path / "ko"
+    cli("key", k, out, "--box", "10,10,70,50")
+    before = {f.name: f.read_bytes() for f in out.iterdir()}
+    real, st = os.replace, {"n": 0}
+
+    def flaky(a, b):
+        if Path(b).parent.resolve() == out.resolve() and Path(a).parent.resolve() != out.resolve():
+            st["n"] += 1
+            if st["n"] == 2:                                       # second NEW file going into place
+                raise KeyboardInterrupt
+        return real(a, b)
+    monkeypatch.setattr(os, "replace", flaky)
+    monkeypatch.setattr(sys, "argv", ["pixelcut", "key", str(k), str(out), "--box", "10,10,70,50", "--scale", "0.8"])
+    with pytest.raises(KeyboardInterrupt):
+        pixelcut.main()
+    monkeypatch.undo()
+    assert st["n"] >= 2
+    assert {f.name: f.read_bytes() for f in out.iterdir()} == before

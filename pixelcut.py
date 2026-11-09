@@ -67,15 +67,51 @@ def real_folder(folder, what):
         sys.exit("%s is a link or not a folder - pixelcut will not work inside it (%s)" % (folder, what))
 
 
+def scratch_beside(path):
+    """A fresh private folder next to the target (same disk, so the final rename is atomic). Returns (folder, file inside it
+    with the target's name). Nothing that already exists can be hit: the folder name is unique and created by us."""
+    import tempfile
+    path = Path(path).resolve()
+    d = Path(tempfile.mkdtemp(prefix=".pixelcut_", dir=path.parent))
+    return d, d / path.name
+
+
+def publish(pairs):
+    """Replace several finished files at once: [(finished_file, destination), ...]. Existing destinations are moved aside first and
+    put back if anything goes wrong, so either all new files are in place or all old ones are."""
+    import tempfile
+    for _, dest in pairs:
+        if Path(dest).exists() and not os.access(dest, os.W_OK):
+            sys.exit("error: %s is read-only - nothing was changed" % dest)
+    aside = Path(tempfile.mkdtemp(prefix=".pixelcut_", dir=Path(pairs[0][1]).resolve().parent))
+    done, kept = [], []
+    try:
+        for i, (_, dest) in enumerate(pairs):
+            if Path(dest).exists():
+                os.replace(dest, aside / str(i))
+                kept.append(i)
+        for i, (src, dest) in enumerate(pairs):
+            os.replace(src, dest)
+            done.append(i)
+    except BaseException:
+        for i in done:
+            Path(pairs[i][1]).unlink(missing_ok=True)
+        for i in kept:
+            if (aside / str(i)).is_file():
+                os.replace(aside / str(i), pairs[i][1])
+        raise
+    finally:
+        shutil.rmtree(aside, ignore_errors=True)
+
+
 def save_atomic(img, path):
-    """Write next to the target, replace only when complete: an abort never leaves half a picture in place of a good one."""
-    path = Path(path)
-    tmp = path.with_name(".pixelcut_tmp_" + path.name)
+    """Write beside the target, replace only when complete: an abort never leaves half a picture in place of a good one."""
+    d, tmp = scratch_beside(path)
     try:
         img.save(tmp)
-        os.replace(tmp, path)
+        os.replace(tmp, Path(path).resolve())
     finally:
-        tmp.unlink(missing_ok=True)
+        shutil.rmtree(d, ignore_errors=True)
 
 
 def foreign_entries(folder, extra=()):
@@ -442,12 +478,17 @@ def cmd_key(a):
     layer[py:py + kh, px:px + kw, 3] = np.clip(al * 255, 0, 255).astype(np.uint8)
     out = Path(a.outdir)
     out.mkdir(parents=True, exist_ok=True)
-    Image.fromarray(np.clip(healed, 0, 255).round().astype(np.uint8)).save(out / "base.png")
-    Image.fromarray(layer, "RGBA").save(out / "element.png")
     comp = healed.copy()
     al3 = layer[:, :, 3:4].astype(np.float32) / 255
     comp = comp * (1 - al3) + layer[:, :, :3].astype(np.float32) * al3
-    Image.fromarray(np.clip(comp, 0, 255).round().astype(np.uint8)).save(out / "preview.png")
+    work, _ = scratch_beside(out / "base.png")                # all three are finished first, then published together
+    try:
+        Image.fromarray(np.clip(healed, 0, 255).round().astype(np.uint8)).save(work / "base.png")
+        Image.fromarray(layer, "RGBA").save(work / "element.png")
+        Image.fromarray(np.clip(comp, 0, 255).round().astype(np.uint8)).save(work / "preview.png")
+        publish([(work / n, out / n) for n in ("base.png", "element.png", "preview.png")])
+    finally:
+        shutil.rmtree(work, ignore_errors=True)
     print("wrote base.png (hole healed), element.png (exact pixels, scale %.2f), preview.png" % a.scale)
 
 
@@ -537,9 +578,14 @@ def cmd_trace(a):
         sys.exit("error: the SVG must be a different file than the input")
     if a.render and Path(a.render).resolve() in (here, Path(a.output).resolve()):
         sys.exit("error: --render must be a different file than the input and the SVG")
-    vtracer.convert_image_to_svg_py(a.input, a.output, colormode="color", hierarchical="stacked", mode="spline",
-                                    filter_speckle=a.speckle, color_precision=a.colors, layer_difference=a.layers,
-                                    corner_threshold=60, length_threshold=3.5, splice_threshold=45, path_precision=3)
+    work, tmp_svg = scratch_beside(a.output)
+    try:
+        vtracer.convert_image_to_svg_py(a.input, str(tmp_svg), colormode="color", hierarchical="stacked", mode="spline",
+                                        filter_speckle=a.speckle, color_precision=a.colors, layer_difference=a.layers,
+                                        corner_threshold=60, length_threshold=3.5, splice_threshold=45, path_precision=3)
+        os.replace(tmp_svg, Path(a.output).resolve())
+    finally:
+        shutil.rmtree(work, ignore_errors=True)
     print("wrote", a.output)
     if a.render:
         import subprocess
@@ -562,7 +608,12 @@ def cmd_trace(a):
                             (t / "p.html").as_uri()], capture_output=True, timeout=120)
             if not shot.exists():
                 sys.exit("error: Chrome did not produce a picture - %s was left as it was" % a.render)
-            shutil.move(str(shot), str(render_target))
+            wd, staged = scratch_beside(render_target)        # copy beside the target first (may be another disk), then one atomic rename
+            try:
+                shutil.copyfile(shot, staged)
+                os.replace(staged, render_target)
+            finally:
+                shutil.rmtree(wd, ignore_errors=True)
         finally:
             shutil.rmtree(tmp.name, ignore_errors=True)       # browser profile included
         print("rendered", a.render)
@@ -640,7 +691,7 @@ def cmd_upscale(a):
     if not exe:
         return lanczos_upscale(a, "no build for this machine")
     target = Path(a.output).resolve()
-    tmp = target.with_name(".pixelcut_tmp_" + target.name)    # the engine writes beside the target; a finished file replaces it, a failed one never does
+    work, tmp = scratch_beside(target)                        # the engine writes into a private folder beside the target; only a finished file replaces it
     try:
         subprocess.run([exe, "-i", str(Path(a.input).resolve()), "-o", str(tmp), "-n", a.model, "-s", str(a.scale)],
                        check=True, cwd=str(Path(exe).parent), capture_output=True, timeout=1800)
@@ -654,7 +705,7 @@ def cmd_upscale(a):
     except subprocess.CalledProcessError:
         return lanczos_upscale(a, "needs a Vulkan GPU/driver")
     finally:
-        tmp.unlink(missing_ok=True)
+        shutil.rmtree(work, ignore_errors=True)
     print("wrote", a.output)
 
 
