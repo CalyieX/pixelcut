@@ -847,3 +847,27 @@ def test_python_api_raises_instead_of_exiting(tmp_path):
     with pytest.raises(pixelcut.PixelcutError, match="different sizes"):
         Image.new("RGB", (5, 5)).save(tmp_path / "s.png")
         pixelcut.compare(EX / "photo_cat.png", tmp_path / "s.png")
+
+
+def test_grid_and_strips_are_exact_for_any_size(tmp_path):
+    import pixelcut
+    rng = np.random.RandomState(5)
+    for (w, h, grid) in [(97, 61, "4x3"), (50, 40, "1x7"), (50, 40, "9x1"), (13, 11, "13x11"), (200, 120, "10x10")]:
+        Image.fromarray((rng.rand(h, w, 3) * 255).astype("uint8")).save(tmp_path / "g.png")
+        out = tmp_path / ("g_" + grid)
+        info = pixelcut.split(tmp_path / "g.png", out, grid=grid)
+        cols, rows = (int(v) for v in grid.split("x"))
+        assert len(info["files"]) == cols * rows and info["grid"] == [cols, rows]
+        masks = [np.array(Image.open(out / f).getchannel("A")) > 0 for f in info["files"]]
+        assert (np.sum(masks, axis=0) == 1).all()                   # every pixel in exactly one cell
+        assert all(m.any() for m in masks)                          # no empty cell
+        pixelcut.join(out, tmp_path / "j.png")
+        assert pixelcut.compare(tmp_path / "g.png", tmp_path / "j.png")["max_diff"] == 0
+
+
+def test_grid_rejects_nonsense(tmp_path):
+    import pixelcut
+    Image.new("RGB", (20, 10), "red").save(tmp_path / "g.png")
+    for bad, word in [("1x1", "two cells"), ("abc", "must look like"), ("30x1", "does not fit"), ("0x5", "two cells"), ("40x40", "at most")]:
+        with pytest.raises(pixelcut.PixelcutError, match=word):
+            pixelcut.split(tmp_path / "g.png", tmp_path / "o", grid=bad)

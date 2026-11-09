@@ -7,7 +7,7 @@ original back (max. deviation <= 1/255, checked by `--verify`).
 
 Commands
   alpha   white background -> transparent (colour-to-alpha), exact over white
-  split   cut into wedges around a centre, dividing lines at free angles, straight or zig-zag, with hit-area polygons
+  split   cut into wedges around a centre (free angles, straight or zig-zag) or into a grid / strips (--grid 4x3), with hit-area polygons
   join    put the parts back together over white (exact)
   compare SSIM + pixel difference of two images
   trace   (vtracer) redraw as SVG - approximate
@@ -317,14 +317,43 @@ def split_sectors(shape, centre, angles, tooth, depth, gap, edge, region=None):
     return sector, slit, edge_zone, order
 
 
+MAX_PARTS = 1024
+
+
+def parse_grid(text, w, h):
+    """'4x3' -> (columns, rows). 1xN = horizontal strips, Nx1 = vertical strips."""
+    try:
+        cols, rows = (int(v) for v in text.lower().split("x"))
+    except ValueError:
+        sys.exit("--grid must look like 4x3 (columns x rows); 1x5 = five horizontal strips, 5x1 = five vertical strips")
+    if cols < 1 or rows < 1 or cols * rows < 2:
+        sys.exit("--grid needs at least two cells, e.g. 2x1")
+    if cols * rows > MAX_PARTS:
+        sys.exit("--grid: at most %d cells" % MAX_PARTS)
+    if cols > w or rows > h:
+        sys.exit("--grid %s does not fit a %dx%d picture (a cell needs at least one pixel)" % (text, w, h))
+    return cols, rows
+
+
+def grid_cells(shape, cols, rows):
+    """Cell id per pixel (col + row * cols). The borders are whole pixels, so every pixel belongs to exactly one cell."""
+    h, w = shape
+    xs = np.minimum(np.arange(w) * cols // w, cols - 1)
+    ys = np.minimum(np.arange(h) * rows // h, rows - 1)
+    return (ys[:, None] * cols + xs[None, :]).astype(np.int32)
+
+
 def cmd_split(a):
-    refuse_inputs([a.input], [Path(a.outdir) / n for n in ["parts.json"] + ["part_%d.png" % k for k in range(64)]])
+    refuse_inputs([a.input], [Path(a.outdir) / n for n in ["parts.json"] + ["part_%d.png" % k for k in range(MAX_PARTS)]])
     rgb = load_rgb(a.input)
     h, w = rgb.shape[:2]
+    grid = parse_grid(a.grid, w, h) if a.grid else None
     rgba = np.dstack([rgb, np.full(rgb.shape[:2], 255, np.uint8)]) if a.opaque else color_to_alpha(rgb)
     if rgba[:, :, 3].max() == 0:                              # no pixel has any alpha: there is literally nothing to cut
         sys.exit("the image is completely white - nothing to cut (use --opaque to cut it anyway)")
-    if a.centre == "auto":                                    # centroid of everything that is not white
+    if grid:
+        centre = (w / 2.0, h / 2.0)
+    elif a.centre == "auto":                                  # centroid of everything that is not white
         m = (rgb.min(2) < 250).astype(np.uint8)
         M = cv2.moments(m, True)
         centre = (M["m10"] / M["m00"], M["m01"] / M["m00"]) if M["m00"] > 0 else (w / 2.0, h / 2.0)
@@ -337,14 +366,17 @@ def cmd_split(a):
     finite(list(centre), "--centre")
     if a.simplify < 0 or not np.isfinite(a.simplify):
         sys.exit("--simplify must be 0 or greater")
-    try:
-        angles = [float(v) for v in a.angles.split(",")]
-        finite(angles, "--angles")
-        angles = [v % 360.0 for v in angles]                  # 360 means 0, -90 means 270
-    except ValueError:
-        sys.exit("--angles must be numbers separated by commas, e.g. 32,148,214,327")
-    if len(angles) < 2 or len({round(v % 360, 6) for v in angles}) != len(angles):
-        sys.exit("--angles needs at least two different angles")
+    if grid:
+        angles = [0.0] * (grid[0] * grid[1])                  # placeholder: one entry per cell, only the count is used
+    else:
+        try:
+            angles = [float(v) for v in a.angles.split(",")]
+            finite(angles, "--angles")
+            angles = [v % 360.0 for v in angles]              # 360 means 0, -90 means 270
+        except ValueError:
+            sys.exit("--angles must be numbers separated by commas, e.g. 32,148,214,327")
+        if len(angles) < 2 or len({round(v % 360, 6) for v in angles}) != len(angles):
+            sys.exit("--angles needs at least two different angles")
     for flag, value in (("--gap", a.gap), ("--edge", a.edge), ("--depth", a.depth), ("--tooth", a.tooth)):
         if not np.isfinite(value) or value < 0:
             sys.exit("%s must be a finite number, 0 or greater" % flag)
@@ -360,8 +392,11 @@ def cmd_split(a):
         if n > 1:                                             # an all-background image has no blob: cut the whole picture
             big = 1 + int(np.argmax(st[1:, cv2.CC_STAT_AREA]))
             region = cv2.dilate((lab == big).astype(np.uint8), np.ones((5, 5), np.uint8)) > 0
-    sector, slit, edge_zone, order = split_sectors((h, w), centre, angles, a.tooth, a.depth, a.gap, a.edge, region)
-    if region is not None:                                    # satellites stay whole: one sector per connected area outside the main blob
+    if grid:                                                  # cells are exact by construction: no slit, no ink edge
+        sector, slit, edge_zone = grid_cells((h, w), *grid), np.zeros((h, w), bool), np.zeros((h, w), bool)
+    else:
+        sector, slit, edge_zone, order = split_sectors((h, w), centre, angles, a.tooth, a.depth, a.gap, a.edge, region)
+    if region is not None and not grid:                       # satellites stay whole: one sector per connected area outside the main blob
         content = cv2.morphologyEx((rgb.min(2) < 250).astype(np.uint8), cv2.MORPH_CLOSE, np.ones((7, 7), np.uint8))
         nl, lab, _, _ = cv2.connectedComponentsWithStats(np.where(region, 0, content).astype(np.uint8))
         for c in range(1, nl):
@@ -416,18 +451,19 @@ def cmd_split(a):
     for k in range(len(angles)):
         img = rgba.copy()
         img[(sector != k) | slit] = 0
-        if a.edge > 0:
+        if a.edge > 0 and not grid:
             e = edge_zone & (sector == k) & (img[:, :, 3] > 0)
             img[e, :3] = ink
             img[e, 3] = 255
         parts.append(img)
         Image.fromarray(img, "RGBA").save(staging / ("part_%d.png" % k))
         solid = ((sector == k) & ~slit & (rgba[:, :, 3] > 8)).astype(np.uint8)
-        info.append({"part": k, "starts_at_angle": sorted(angles)[k],
+        info.append({"part": k, "starts_at_angle": 0 if grid else sorted(angles)[k], **({"cell": [k % grid[0], k // grid[0]]} if grid else {}),
                      "polygon": contour_polygon(solid, a.simplify), "polygons": contour_polygons(solid, a.simplify),
                      "fattest_point": fattest_point(solid)})
     files = ["part_%d.png" % k for k in range(len(parts))]
-    (staging / "parts.json").write_text(json.dumps({"size": [w, h], "centre": list(centre), "files": files, "parts": info}, indent=1))
+    (staging / "parts.json").write_text(json.dumps({"size": [w, h], "centre": list(centre), "files": files, "parts": info,
+                                                    **({"grid": list(grid)} if grid else {})}, indent=1))
     backup = out / ".pixelcut_old"                            # old files are moved aside, not deleted - an abort rolls back
     backup.mkdir()                                            # (a leftover one was restored above, so this is always new)
     write_journal(backup, [])                       # names this run is installing, written BEFORE each install (all old files are aside by then)
@@ -775,6 +811,7 @@ def build_parser(parser_class=argparse.ArgumentParser):
 
     s = sub.add_parser("split", help="cut into wedges with straight or zig-zag dividing lines")
     s.add_argument("input"); s.add_argument("outdir")
+    s.add_argument("--grid", help="instead of wedges: COLSxROWS cells, e.g. 4x3; 1x5 = five horizontal strips, 5x1 = five vertical strips (always exact, no slit)")
     s.add_argument("--centre", default="auto", help="x,y of the centre or 'auto' (centroid of the non-white area)")
     s.add_argument("--angles", default="45,135,225,315", help="angles of the dividing lines in degrees (0 = right, 90 = down); free, e.g. 32,148,214,327")
     s.add_argument("--tooth", type=float, default=18.0, help="zig-zag period in px")

@@ -49,6 +49,8 @@
     <input id="files" type="file" accept="image/*">
 
     <div id="splitOpts">
+      <label for="grid">Grid instead of wedges, e.g. 4x3 (columns x rows; 1x5 = strips). Leave empty for wedges.</label>
+      <input id="grid" type="text" value="" placeholder="empty = wedges" autocomplete="off">
       <label for="angles">Angles of the cuts in degrees (0 = right, 90 = down)</label>
       <input id="angles" type="text" value="45,135,225,315" inputmode="decimal" autocomplete="off">
       <div class="row">
@@ -155,7 +157,8 @@ async function go() {
       const v = $(id).value.trim();
       if (v === "" || !Number.isFinite(Number(v)) || Number(v) < 0) { status("Please enter a number (0 or more) in every number field.", "bad"); return; }
     }
-    if (cmd === "split" && !/^\s*-?\d+(\.\d+)?(\s*,\s*-?\d+(\.\d+)?)*\s*$/.test($("angles").value)) { status("Angles must look like 45,135,225,315", "bad"); return; }
+    if (cmd === "split" && $("grid").value.trim() && !/^\s*\d+\s*[xX]\s*\d+\s*$/.test($("grid").value)) { status("Grid must look like 4x3 (columns x rows)", "bad"); return; }
+    if (cmd === "split" && !$("grid").value.trim() && !/^\s*-?\d+(\.\d+)?(\s*,\s*-?\d+(\.\d+)?)*\s*$/.test($("angles").value)) { status("Angles must look like 45,135,225,315", "bad"); return; }
     try {                                                           // the browser has far less memory than a computer: refuse early and clearly
       const bmp = await createImageBitmap(files[0]);
       const mp = bmp.width * bmp.height / 1e6; bmp.close();
@@ -177,6 +180,7 @@ async function go() {
       if (cmd === "alpha") argv = ["alpha", "/work/in/input", "/work/out/transparent.png"];
       else {
         argv = ["split", "/work/in/input", "/work/out/parts", "--angles=" + $("angles").value.trim(),
+                ...($("grid").value.trim() ? ["--grid=" + $("grid").value.trim().replace(/\s+/g, "")] : []),
                 "--depth", $("depth").value, "--tooth", $("tooth").value, "--gap", $("gap").value, "--edge", $("edge").value];
         if ($("opaque").checked) argv.push("--opaque");
       }
