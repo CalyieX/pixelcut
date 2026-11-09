@@ -108,6 +108,7 @@ python pixelcut.py split bild.png out --angles 32,148,214,327 --tooth 18 --depth
 - **Nur die Hauptform schneiden.** `--only-inside` schneidet nur den größten zusammenhängenden Bereich. Wolken, Sterne und Punkte drumherum bleiben ganz und gehören jeweils einem einzigen Teil (dem, in dem die meiste Fläche liegt).
 - **Trefferflächen.** `parts.json` enthält pro Teil `polygon` (größte Außenkontur), `polygons` (alle getrennten Flächen mit ihren Löchern) und den dicksten Punkt (guter Platz für ein Symbol). Damit baut man Touch-Menüs, Klickflächen und Hotspots. Im Original-Projekt: Android `Path` + `Region`.
 - **Raster und Streifen.** `--grid 4x3` schneidet in 4 Spalten mal 3 Reihen statt in Keile, `--grid 1x5` in fünf waagerechte, `--grid 5x1` in fünf senkrechte Streifen. Jedes Pixel gehört genau einer Zelle, es gibt weder Spalt noch Tintenkante, der Rundlauf ist exakt. `parts.json` nennt pro Teil die Zelle (`cell`: Spalte, Reihe). Höchstens 1024 Zellen, und jede braucht mindestens ein Pixel.
+- **Zuordnungskarte (Pixelebene).** `pixelcut labels bild.png karte.png --grid 8x6` schreibt EIN Bild, in dem jedes Pixel die Nummer seines Teils trägt (Grauwert, 8 oder 16 Bit). `split bild.png teile --from-labels karte.png` schneidet exakt entlang einer solchen Karte, auch für beliebige Formen: Puzzle, Umrisse, Masken aus einer KI-Auswahl. Die Nummern müssen nicht lückenlos sein, das Bild muss gleich groß sein, höchstens 1024 Teile. Der Rundlauf bleibt exakt. Aus Python: `pixelcut.labels(...)` und `split(..., from_labels=...)`.
 - **Fotos.** `--opaque` lässt jedes Pixel deckend, damit helle Bildstellen nicht angetastet werden.
 
 Ausgabe: `part_0.png … part_N.png` (RGBA, gleiche Größe wie das Original, nur die Pixel des Teils sind sichtbar) und `parts.json`.
@@ -157,7 +158,7 @@ Bitte vorher lesen, das spart Zeit.
 2. **Es bildet ein Bild nicht ohne Vorlage nach.** Wer ein Bild "neu aufbauen" will, ohne dass es abweicht, braucht das Original als Quelle. Ein Bild, das nicht vom Original zu unterscheiden sein soll, **ist** das Original. Alles, was neu zeichnet (Hand, KI, Tracer), weicht ab. Die Zahlen unten zeigen, wie viel.
 3. **Es macht Bilder nicht größer, ohne Pixel zu erfinden.** Mehr Auflösung geht nur durch Rechnen. `upscale` nutzt dafür Real-ESRGAN, das neue Pixel erfindet. Das Ergebnis ist schärfer, aber nicht mehr exakt.
 4. **Keine Form-Erkennung, keine Objekte.** Es schneidet nach Geometrie (Winkel um eine Mitte), nicht nach Inhalt. Es erkennt keine Personen, Gegenstände oder Texte.
-5. **Keine freien Polygone.** `split` schneidet Keile um **eine** Mitte oder ein gleichmäßiges Raster (`--grid`). Für freie Formen wie Puzzleteile gibt es Grafikprogramme.
+5. **Freie Formen nur über eine Karte.** `split` schneidet Keile, ein Raster (`--grid`) oder entlang einer fertigen Zuordnungskarte (`--from-labels`). Pixelcut zeichnet die Karte nicht selbst; dafür braucht es ein Grafikprogramm oder eine KI-Auswahl. Außerdem nur 2D: 3D-Objekte verändert es nicht, ein gerendertes Bild davon lässt sich aber zerlegen.
 6. **`key` ist einfach gebaut.** Es erkennt das Element als "alles, was von der Hintergrundfarbe abweicht". Bei Verlauf, Muster oder Foto als Hintergrund liegt es daneben. Das Füllen der Lücke ist eine glatte Fläche (keine Textur, kein Inpainting).
 7. **`alpha` ist nur für weiße Hintergründe.** Andere Hintergrundfarben oder Fotos mit weißem Himmel werden nicht sauber freigestellt (bei Fotos `--opaque` benutzen).
 8. **Keine Animation, keine Videos, keine Vektorgrafik.** Nur Rastergrafik (PNG, JPEG usw.). Ausgabe ist PNG mit Alphakanal.
@@ -213,7 +214,7 @@ pip install -e ".[test]"
 pytest -q
 ```
 
-149 Tests. Sie prüfen die gespeicherten Dateien: Rundlauf split + join ist exakt (Zeichnung, Foto, gerade und Zickzack), die Teile überlappen nicht, Polygone, Winkel, Mitte, Größe und dickster Punkt stimmen mit den Teilen überein, `compare`, `key` und `alpha` rechnen richtig, `join` verweigert fehlende oder falsch große Teile, `split` fasst fremde Dateien nicht an, und schlechte Eingaben ergeben eine klare Fehlerzeile. Eingebaute Fehler (Mutationen) werden gefangen.
+151 Tests. Sie prüfen die gespeicherten Dateien: Rundlauf split + join ist exakt (Zeichnung, Foto, gerade und Zickzack), die Teile überlappen nicht, Polygone, Winkel, Mitte, Größe und dickster Punkt stimmen mit den Teilen überein, `compare`, `key` und `alpha` rechnen richtig, `join` verweigert fehlende oder falsch große Teile, `split` fasst fremde Dateien nicht an, und schlechte Eingaben ergeben eine klare Fehlerzeile. Eingebaute Fehler (Mutationen) werden gefangen.
 
 ---
 

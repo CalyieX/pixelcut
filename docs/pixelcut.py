@@ -7,7 +7,9 @@ original back (max. deviation <= 1/255, checked by `--verify`).
 
 Commands
   alpha   white background -> transparent (colour-to-alpha), exact over white
-  split   cut into wedges around a centre (free angles, straight or zig-zag) or into a grid / strips (--grid 4x3), with hit-area polygons
+  split   cut into wedges around a centre (free angles, straight or zig-zag), into a grid / strips (--grid 4x3) or along a label map
+          (--from-labels, any shape), with hit-area polygons
+  labels  write a label map: ONE picture in which every pixel carries the number of its part (--grid 4x3)
   join    put the parts back together over white (exact)
   compare SSIM + pixel difference of two images
   trace   (vtracer) redraw as SVG - approximate
@@ -343,15 +345,54 @@ def grid_cells(shape, cols, rows):
     return (ys[:, None] * cols + xs[None, :]).astype(np.int32)
 
 
+def read_label_map(path, w, h):
+    """Label picture -> (part id 0..n-1 per pixel, n). Grey values are the part numbers (8 or 16 bit, indexed also fine); the
+    numbers need not be consecutive, parts are ordered by value. Every pixel belongs to exactly one part."""
+    try:
+        im = Image.open(path)
+        im.load()
+    except Exception as e:
+        sys.exit("--from-labels: cannot read %s (%s)" % (path, (str(e).strip().splitlines() or [type(e).__name__])[0]))
+    if im.mode in ("RGB", "RGBA", "LA", "F", "CMYK", "YCbCr", "LAB", "HSV"):
+        sys.exit("--from-labels needs a grey picture (one number per pixel), not a colour one - %s is %s" % (path, im.mode))
+    if im.size != (w, h):
+        sys.exit("--from-labels: the label picture is %dx%d but the image is %dx%d - they must match" % (im.width, im.height, w, h))
+    if im.mode == "1":
+        im = im.convert("L")
+    raw = np.array(im).astype(np.int64)                       # 'P' keeps its palette indices, which are the numbers
+    values, ids = np.unique(raw, return_inverse=True)
+    if len(values) < 2:
+        sys.exit("--from-labels: the label picture has only one value - at least two parts are needed")
+    if len(values) > MAX_PARTS:
+        sys.exit("--from-labels: %d different values, at most %d parts" % (len(values), MAX_PARTS))
+    return ids.reshape(h, w).astype(np.int32), len(values)
+
+
+def cmd_labels(a):
+    refuse_inputs([a.input], [a.output])
+    need_folder_of(a.output)
+    w, h = open_upright(a.input).size
+    cols, rows = parse_grid(a.grid, w, h)
+    ids = grid_cells((h, w), cols, rows)
+    save_atomic(Image.fromarray(ids.astype(np.uint8)) if cols * rows <= 256 else Image.fromarray(ids.astype(np.uint16)), a.output)
+    print("wrote label map %s: %d parts, value = part number" % (a.output, cols * rows))
+
+
 def cmd_split(a):
-    refuse_inputs([a.input], [Path(a.outdir) / n for n in ["parts.json"] + ["part_%d.png" % k for k in range(MAX_PARTS)]])
+    if a.grid and a.from_labels:
+        sys.exit("use either --grid or --from-labels, not both")
+    refuse_inputs([a.input] + ([a.from_labels] if a.from_labels else []),
+                  [Path(a.outdir) / n for n in ["parts.json"] + ["part_%d.png" % k for k in range(MAX_PARTS)]])
     rgb = load_rgb(a.input)
     h, w = rgb.shape[:2]
     grid = parse_grid(a.grid, w, h) if a.grid else None
+    labelled = read_label_map(a.from_labels, w, h) if a.from_labels else None
+    exact = bool(grid or labelled)                            # cells / label parts are exact by construction: no slit, no ink edge
+    nparts = grid[0] * grid[1] if grid else labelled[1] if labelled else None
     rgba = np.dstack([rgb, np.full(rgb.shape[:2], 255, np.uint8)]) if a.opaque else color_to_alpha(rgb)
     if rgba[:, :, 3].max() == 0:                              # no pixel has any alpha: there is literally nothing to cut
         sys.exit("the image is completely white - nothing to cut (use --opaque to cut it anyway)")
-    if grid:
+    if exact:
         centre = (w / 2.0, h / 2.0)
     elif a.centre == "auto":                                  # centroid of everything that is not white
         m = (rgb.min(2) < 250).astype(np.uint8)
@@ -366,8 +407,8 @@ def cmd_split(a):
     finite(list(centre), "--centre")
     if a.simplify < 0 or not np.isfinite(a.simplify):
         sys.exit("--simplify must be 0 or greater")
-    if grid:
-        angles = [0.0] * (grid[0] * grid[1])                  # placeholder: one entry per cell, only the count is used
+    if exact:
+        angles = [0.0] * nparts                               # placeholder: one entry per part, only the count is used
     else:
         try:
             angles = [float(v) for v in a.angles.split(",")]
@@ -392,11 +433,12 @@ def cmd_split(a):
         if n > 1:                                             # an all-background image has no blob: cut the whole picture
             big = 1 + int(np.argmax(st[1:, cv2.CC_STAT_AREA]))
             region = cv2.dilate((lab == big).astype(np.uint8), np.ones((5, 5), np.uint8)) > 0
-    if grid:                                                  # cells are exact by construction: no slit, no ink edge
-        sector, slit, edge_zone = grid_cells((h, w), *grid), np.zeros((h, w), bool), np.zeros((h, w), bool)
+    if exact:
+        sector = grid_cells((h, w), *grid) if grid else labelled[0]
+        slit, edge_zone = np.zeros((h, w), bool), np.zeros((h, w), bool)
     else:
         sector, slit, edge_zone, order = split_sectors((h, w), centre, angles, a.tooth, a.depth, a.gap, a.edge, region)
-    if region is not None and not grid:                       # satellites stay whole: one sector per connected area outside the main blob
+    if region is not None and not exact:                       # satellites stay whole: one sector per connected area outside the main blob
         content = cv2.morphologyEx((rgb.min(2) < 250).astype(np.uint8), cv2.MORPH_CLOSE, np.ones((7, 7), np.uint8))
         nl, lab, _, _ = cv2.connectedComponentsWithStats(np.where(region, 0, content).astype(np.uint8))
         for c in range(1, nl):
@@ -447,23 +489,22 @@ def cmd_split(a):
         shutil.rmtree(staging)
     staging.mkdir()
     ink = np.array([20, 16, 14], np.uint8)
-    parts, info = [], []
+    info = []
     for k in range(len(angles)):
         img = rgba.copy()
         img[(sector != k) | slit] = 0
-        if a.edge > 0 and not grid:
+        if a.edge > 0 and not exact:
             e = edge_zone & (sector == k) & (img[:, :, 3] > 0)
             img[e, :3] = ink
             img[e, 3] = 255
-        parts.append(img)
         Image.fromarray(img, "RGBA").save(staging / ("part_%d.png" % k))
         solid = ((sector == k) & ~slit & (rgba[:, :, 3] > 8)).astype(np.uint8)
-        info.append({"part": k, "starts_at_angle": 0 if grid else sorted(angles)[k], **({"cell": [k % grid[0], k // grid[0]]} if grid else {}),
+        info.append({"part": k, "starts_at_angle": 0 if exact else sorted(angles)[k], **({"cell": [k % grid[0], k // grid[0]]} if grid else {}),
                      "polygon": contour_polygon(solid, a.simplify), "polygons": contour_polygons(solid, a.simplify),
                      "fattest_point": fattest_point(solid)})
-    files = ["part_%d.png" % k for k in range(len(parts))]
+    files = ["part_%d.png" % k for k in range(len(angles))]
     (staging / "parts.json").write_text(json.dumps({"size": [w, h], "centre": list(centre), "files": files, "parts": info,
-                                                    **({"grid": list(grid)} if grid else {})}, indent=1))
+                                                    **({"grid": list(grid)} if grid else {}), **({"from_labels": True} if labelled else {})}, indent=1))
     backup = out / ".pixelcut_old"                            # old files are moved aside, not deleted - an abort rolls back
     backup.mkdir()                                            # (a leftover one was restored above, so this is always new)
     write_journal(backup, [])                       # names this run is installing, written BEFORE each install (all old files are aside by then)
@@ -492,15 +533,15 @@ def cmd_split(a):
     os.replace(backup, out / DONE)                            # commit point: from here on the new set is the truth
     shutil.rmtree(out / DONE)
     shutil.rmtree(staging)
-    print("wrote %d parts + parts.json to %s" % (len(parts), out))
+    print("wrote %d parts + parts.json to %s" % (len(angles), out))
     if a.verify:
         # without slit and edge the parts must add up to the original over white
-        flat = [rgba.copy() for _ in parts]
+        flat = [rgba.copy() for _ in angles]
         for k, im in enumerate(flat):
             im[sector != k] = 0
         err = np.abs(over_white(flat) - rgb.astype(np.float32)).max()
         print("max deviation over white without slit: %.2f / 255" % err)
-        real = over_white([np.array(Image.open(out / ("part_%d.png" % k)).convert("RGBA")) for k in range(len(parts))])
+        real = over_white([np.array(Image.open(out / ("part_%d.png" % k)).convert("RGBA")) for k in range(len(angles))])
         real_err = np.abs(real - rgb.astype(np.float32)).max()
         print("saved files joined over white:        %.2f / 255 (with --gap %.1f --edge %.1f the slit is visible on purpose; 0 slit = exact)" % (real_err, a.gap, a.edge))
 
@@ -812,6 +853,7 @@ def build_parser(parser_class=argparse.ArgumentParser):
     s = sub.add_parser("split", help="cut into wedges with straight or zig-zag dividing lines")
     s.add_argument("input"); s.add_argument("outdir")
     s.add_argument("--grid", help="instead of wedges: COLSxROWS cells, e.g. 4x3; 1x5 = five horizontal strips, 5x1 = five vertical strips (always exact, no slit)")
+    s.add_argument("--from-labels", help="instead of wedges: a label map (grey picture, same size, value = part number) - any shape, e.g. a segmentation mask; exact, no slit")
     s.add_argument("--centre", default="auto", help="x,y of the centre or 'auto' (centroid of the non-white area)")
     s.add_argument("--angles", default="45,135,225,315", help="angles of the dividing lines in degrees (0 = right, 90 = down); free, e.g. 32,148,214,327")
     s.add_argument("--tooth", type=float, default=18.0, help="zig-zag period in px")
@@ -823,6 +865,11 @@ def build_parser(parser_class=argparse.ArgumentParser):
     s.add_argument("--opaque", action="store_true", help="photos: keep every pixel opaque, no white-to-alpha")
     s.add_argument("--verify", action="store_true")
     s.set_defaults(fn=cmd_split)
+
+    s = sub.add_parser("labels", help="write a label map: one picture, every pixel = number of its part")
+    s.add_argument("input"); s.add_argument("output")
+    s.add_argument("--grid", required=True, help="COLSxROWS cells, e.g. 4x3 (1x5 = horizontal strips, 5x1 = vertical strips)")
+    s.set_defaults(fn=cmd_labels)
 
     s = sub.add_parser("key", help="lift a foreground element out of a flat area, shrink and centre it, heal the hole")
     s.add_argument("input"); s.add_argument("outdir")
@@ -919,10 +966,18 @@ def alpha(input, output, verify=False):
 
 
 def split(input, outdir, **options):
-    """Cut a picture into wedges (options: centre, angles, tooth, depth, gap, edge, only_inside, simplify, opaque, verify).
+    """Cut a picture into wedges (options: centre, angles, tooth, depth, gap, edge, only_inside, simplify, opaque, verify)
+    or exactly along grid='4x3' / from_labels='map.png'.
     Returns the content of parts.json as a dict (size, parts, files, hit polygons); the pictures are part_N.png in outdir."""
     _run("split", [input, outdir], options)
     return json.loads((Path(outdir) / "parts.json").read_text(encoding="utf-8"))
+
+
+def labels(input, output, grid):
+    """Write a label map (one picture, every pixel = number of its part) for a grid like '4x3'. Returns the output path.
+    Use it with split(..., from_labels=output), or paint/produce your own map (e.g. a segmentation mask)."""
+    _run("labels", [input, output], {"grid": grid})
+    return Path(output)
 
 
 def join(parts, output):
@@ -967,7 +1022,7 @@ def upscale(input, output, **options):
     return Path(output)
 
 
-__all__ = ["PixelcutError", "alpha", "split", "join", "key", "compare", "trace", "upscale"]
+__all__ = ["PixelcutError", "alpha", "split", "labels", "join", "key", "compare", "trace", "upscale"]
 
 
 if __name__ == "__main__":

@@ -871,3 +871,42 @@ def test_grid_rejects_nonsense(tmp_path):
     for bad, word in [("1x1", "two cells"), ("abc", "must look like"), ("30x1", "does not fit"), ("0x5", "two cells"), ("40x40", "at most")]:
         with pytest.raises(pixelcut.PixelcutError, match=word):
             pixelcut.split(tmp_path / "g.png", tmp_path / "o", grid=bad)
+
+
+def test_label_map_roundtrip_and_arbitrary_shapes(tmp_path):
+    import pixelcut
+    rng = np.random.RandomState(9)
+    w, h = 71, 53
+    Image.fromarray((rng.rand(h, w, 3) * 255).astype("uint8")).save(tmp_path / "o.png")
+    # 1. the map of a grid, then split along it: identical to --grid
+    pixelcut.labels(tmp_path / "o.png", tmp_path / "map.png", grid="5x4")
+    assert np.array(Image.open(tmp_path / "map.png")).max() == 19
+    a = pixelcut.split(tmp_path / "o.png", tmp_path / "a", from_labels=tmp_path / "map.png")
+    b = pixelcut.split(tmp_path / "o.png", tmp_path / "b", grid="5x4")
+    assert len(a["files"]) == len(b["files"]) == 20 and a["from_labels"] is True
+    for f in a["files"]:
+        assert (tmp_path / "a" / f).read_bytes() == (tmp_path / "b" / f).read_bytes()
+    # 2. a free-form map (random blobs, non-consecutive numbers, 16 bit): exact
+    blobs = (rng.rand(h, w) * 7).astype(np.uint16) * 300 + 5
+    Image.fromarray(blobs).save(tmp_path / "blobs.png")
+    info = pixelcut.split(tmp_path / "o.png", tmp_path / "c", from_labels=tmp_path / "blobs.png")
+    masks = [np.array(Image.open(tmp_path / "c" / f).getchannel("A")) > 0 for f in info["files"]]
+    assert len(masks) == 7 and (np.sum(masks, axis=0) == 1).all()
+    pixelcut.join(tmp_path / "c", tmp_path / "j.png")
+    assert pixelcut.compare(tmp_path / "o.png", tmp_path / "j.png")["max_diff"] == 0
+
+
+def test_label_map_rejects_nonsense(tmp_path):
+    import pixelcut
+    Image.new("RGB", (20, 10), "red").save(tmp_path / "o.png")
+    Image.new("RGB", (20, 10), "blue").save(tmp_path / "colour.png")
+    Image.new("L", (19, 10), 0).save(tmp_path / "wrongsize.png")
+    Image.new("L", (20, 10), 3).save(tmp_path / "one.png")
+    (tmp_path / "junk.png").write_text("no picture")
+    for m, word in [("colour.png", "grey picture"), ("wrongsize.png", "must match"), ("one.png", "only one value"), ("junk.png", "cannot read")]:
+        with pytest.raises(pixelcut.PixelcutError, match=word):
+            pixelcut.split(tmp_path / "o.png", tmp_path / "x", from_labels=tmp_path / m)
+    with pytest.raises(pixelcut.PixelcutError, match="not both"):
+        pixelcut.split(tmp_path / "o.png", tmp_path / "x", grid="2x2", from_labels=tmp_path / "one.png")
+    with pytest.raises(pixelcut.PixelcutError, match="is also an input"):
+        pixelcut.labels(tmp_path / "o.png", tmp_path / "o.png", grid="2x2")
