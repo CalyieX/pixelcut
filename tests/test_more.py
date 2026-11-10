@@ -798,7 +798,7 @@ def test_publish_keeps_the_old_files_when_the_rollback_itself_fails(tmp_path, mo
     with pytest.raises(OSError):
         pixelcut.publish(pairs)
     monkeypatch.undo()
-    kept = list(d.glob(".pixelcut_*/*"))
+    kept = [f for f in d.glob(".pixelcut_*/*") if f.name.isdigit()]       # the backups; publish.json / installing are bookkeeping
     assert {f.read_text() for f in kept} == {"old a", "old b"}      # the only copies of the old files still exist
     assert "previous files are kept in" in capsys.readouterr().err
 
@@ -1085,13 +1085,13 @@ def test_ignored_note_not_followed_by_an_error_and_missing_input_is_clean(tmp_pa
     r = cli("split", tmp_path / "o.png", tmp_path / "g", "--grid", "2x2", "--gap", "-1", check=False)
     assert r.returncode != 0 and "ignored" not in r.stderr
     r = cli("split", tmp_path / "missing.png", tmp_path / "g2", "--grid", "2x2", check=False)
-    assert r.returncode != 0 and "cannot find" in r.stderr and "Errno" not in r.stderr
+    assert r.returncode != 0 and "does not exist" in r.stderr and "Errno" not in r.stderr
 
 
 def test_browser_page_matches_cli_rules():
     html = (Path(__file__).resolve().parent.parent / "docs" / "index.html").read_text(encoding="utf-8")
     assert r"part_(0|[1-9]\d*)\.png" in html                      # same names as split writes
-    assert "numeric: true" in html and "re.split" in html         # part_2 before part_10
+    assert "numeric: true" in html and 're.split(r"(\\\\d+)"' in html   # part_2 before part_10; inside a JS template `\d` would lose its backslash
 
 
 def test_jpeg_compressed_tiff_label_map_is_refused(tmp_path):
@@ -1123,3 +1123,97 @@ def test_alpha_verify_measures_the_saved_file(tmp_path):
     Image.fromarray((np.random.RandomState(2).rand(20, 30, 3) * 255).astype("uint8")).save(tmp_path / "o.png")
     r = cli("alpha", tmp_path / "o.png", tmp_path / "a.png", "--verify")
     assert "saved file" in r.stdout and float(r.stdout.split("white:")[1].split("/")[0]) < 1
+
+
+def test_zip_order_code_in_the_browser_page_really_sorts_naturally(tmp_path):
+    """Runs the Python the page ships (after JS template-literal unescaping), not just greps it."""
+    html = (Path(__file__).resolve().parent.parent / "docs" / "index.html").read_text(encoding="utf-8")
+    src = html.split("def zip_dir", 1)[1].split("`);", 1)[0]
+    src = "import os, re, zipfile\ndef zip_dir" + src.replace("\\\\", "\\")            # what JS makes of the template literal
+    ns = {}
+    exec(src, ns)
+    folder = tmp_path / "parts"
+    folder.mkdir()
+    for k in range(12):
+        (folder / ("part_%d.png" % k)).write_bytes(b"x")
+    ns["zip_dir"](str(folder), str(tmp_path / "z.zip"))
+    import zipfile
+    assert zipfile.ZipFile(tmp_path / "z.zip").namelist() == ["part_%d.png" % k for k in range(12)]
+
+
+def test_sibling_commands_give_plain_messages_for_folders_and_readonly_outputs(tmp_path):
+    import stat
+    Image.new("RGB", (20, 20), "red").save(tmp_path / "o.png")
+    (tmp_path / "adir").mkdir()
+    for args in (("alpha", "adir", "x.png"), ("labels", "adir", "x.png", "--grid", "2x2"), ("compare", "o.png", "adir"),
+                 ("trace", "adir", "x.svg"), ("upscale", "adir", "x.png", "--no-ai")):
+        r = subprocess.run([sys.executable, str(ROOT / "pixelcut.py")] + [str(tmp_path / a) if a in ("adir", "o.png") else a for a in args],
+                           capture_output=True, text=True, cwd=tmp_path)
+        assert r.returncode != 0 and "is a folder" in r.stderr and "Errno" not in r.stderr, (args, r.stderr)
+    ro = tmp_path / "ro.png"
+    Image.new("RGB", (20, 20), "blue").save(ro)
+    os.chmod(ro, stat.S_IREAD)
+    try:
+        for args in (("alpha", "o.png", "ro.png"), ("labels", "o.png", "ro.png", "--grid", "2x2"),
+                     ("upscale", "o.png", "ro.png", "--no-ai")):
+            r = subprocess.run([sys.executable, str(ROOT / "pixelcut.py")] + [str(tmp_path / a) if a == "o.png" else a for a in args],
+                               capture_output=True, text=True, cwd=tmp_path)
+            assert r.returncode != 0 and "read-only" in r.stderr and "WinError" not in r.stderr, (args, r.stderr)
+    finally:
+        os.chmod(ro, stat.S_IWRITE | stat.S_IREAD)
+
+
+def test_trace_refuses_wrong_endings(tmp_path):
+    Image.new("RGB", (20, 20), "red").save(tmp_path / "o.png")
+    r = cli("trace", tmp_path / "o.png", tmp_path / "t.png", check=False)
+    assert r.returncode != 0 and "*.svg" in r.stderr and not (tmp_path / "t.png").exists()
+    r = cli("trace", tmp_path / "o.png", tmp_path / "t.svg", "--render", tmp_path / "r.jpg", check=False)
+    assert r.returncode != 0 and "*.png" in r.stderr and not (tmp_path / "t.svg").exists()
+
+
+def test_upscale_api_warns_when_it_falls_back(tmp_path):
+    import pixelcut
+    Image.new("RGB", (10, 10), "red").save(tmp_path / "o.png")
+    with pytest.warns(UserWarning, match="Lanczos"):
+        pixelcut.upscale(tmp_path / "o.png", tmp_path / "u.png", scale=2, bin=str(tmp_path / "nope.exe"))
+    assert Image.open(tmp_path / "u.png").size == (20, 20)
+
+
+def test_publish_recovers_after_a_hard_abort(tmp_path):
+    import json as _json
+    import pixelcut
+    for state in ("moving", "installing", "committed"):
+        d = tmp_path / state
+        d.mkdir()
+        new = [d / "new_a.tmp", d / "new_b.tmp"]
+        dests = [d / "a.png", d / "b.png"]
+        (d / "b.png").write_bytes(b"OLD-B")
+        aside = d / ".pixelcut_crash"
+        aside.mkdir()
+        (aside / "publish.json").write_text(_json.dumps({"dests": [str(x.resolve()) for x in dests]}))
+        if state == "moving":                                  # a.png was moved aside, b.png not yet
+            (aside / "0").write_bytes(b"OLD-A")
+        else:                                                   # every old file is aside, new files partly installed
+            (aside / "0").write_bytes(b"OLD-A")
+            (aside / "1").write_bytes(b"OLD-B")
+            (d / "b.png").write_bytes(b"NEW-B")
+            (d / "a.png").write_bytes(b"NEW-A")
+            (aside / "installing").write_text("1")
+            if state == "committed":
+                (aside / "committed").write_text("1")
+        pixelcut.recover_publish(d)
+        assert not aside.exists(), state
+        if state == "committed":
+            assert (d / "a.png").read_bytes() == b"NEW-A" and (d / "b.png").read_bytes() == b"NEW-B"
+        else:
+            assert (d / "a.png").read_bytes() == b"OLD-A" and (d / "b.png").read_bytes() == b"OLD-B", state
+
+
+def test_jpeg2000_label_map_is_refused(tmp_path):
+    Image.new("RGB", (64, 64), "red").save(tmp_path / "o.png")
+    try:
+        Image.fromarray(((np.random.RandomState(1).rand(64, 64) > .5) * 255).astype("uint8")).save(tmp_path / "m.jp2", irreversible=True)
+    except Exception:
+        pytest.skip("this Pillow cannot write JPEG 2000")
+    r = cli("split", tmp_path / "o.png", tmp_path / "x", "--from-labels", tmp_path / "m.jp2", check=False)
+    assert r.returncode != 0 and "lossy" in r.stderr

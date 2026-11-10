@@ -32,7 +32,7 @@ import numpy as np
 from PIL import Image, ImageOps
 
 
-__version__ = "1.6.4"
+__version__ = "1.6.5"
 PART_NAME = re.compile(r"part_(0|[1-9]\d*)\.png")                  # exactly the names split writes: no leading zeros
 LOSSLESS = (".png", ".tif", ".tiff")
 
@@ -85,20 +85,25 @@ def publish(pairs):
     put back if anything goes wrong, so either all new files are in place or all old ones are. The aside folder is the truth about
     what has to be restored (no bookkeeping that an abort could skip) and it is deleted only when it is empty again."""
     import tempfile
+    folder = Path(pairs[0][1]).resolve().parent
+    recover_publish(folder)                                   # a hard abort of an earlier run is finished first
     for _, dest in pairs:
         if os.path.lexists(dest) and (link_like(dest) or not Path(dest).is_file()):
             sys.exit("error: %s exists and is not a plain file (folder or link) - nothing was changed" % dest)
         if Path(dest).exists() and not os.access(dest, os.W_OK):
             sys.exit("error: %s is read-only - nothing was changed" % dest)
-    aside = Path(tempfile.mkdtemp(prefix=".pixelcut_", dir=Path(pairs[0][1]).resolve().parent))
+    aside = Path(tempfile.mkdtemp(prefix=".pixelcut_", dir=folder))
+    (aside / "publish.json").write_text(json.dumps({"dests": [str(Path(d).resolve()) for _, d in pairs]}), encoding="utf-8")   # lets a later run undo an abort
     installed = []
     try:
         for i, (_, dest) in enumerate(pairs):
             if Path(dest).exists():
                 os.replace(dest, aside / str(i))
+        (aside / "installing").write_text("1")                # from here on every destination that exists is a new file
         for src, dest in pairs:
             installed.append(dest)                            # before the move: an abort in between must still clean up
             os.replace(src, dest)
+        (aside / "committed").write_text("1")                 # the new set is complete: a later run only removes the backup
     except BaseException:
         stuck = []
         for dest in installed:
@@ -106,7 +111,7 @@ def publish(pairs):
                 Path(dest).unlink(missing_ok=True)
             except OSError as e:
                 stuck.append("%s (%s)" % (dest, e))
-        for f in list(aside.iterdir()):
+        for f in [f for f in aside.iterdir() if f.name.isdigit()]:
             try:
                 os.replace(f, pairs[int(f.name)][1])
             except OSError as e:
@@ -117,6 +122,29 @@ def publish(pairs):
             shutil.rmtree(aside, ignore_errors=True)
         raise
     shutil.rmtree(aside, ignore_errors=True)
+
+
+def recover_publish(folder):
+    """Finish what a hard abort (power cut, kill) left behind in publish(): a backup folder with publish.json beside the files.
+    'committed' = the new set is complete, drop the backup; otherwise go back to the old set (delete the new files if the
+    install phase had started, then put the backups back)."""
+    for d in sorted(Path(folder).glob(".pixelcut_*")):
+        meta = d / "publish.json"
+        if link_like(d) or not d.is_dir() or not meta.is_file():
+            continue
+        try:
+            dests = json.loads(meta.read_text(encoding="utf-8"))["dests"]
+            assert isinstance(dests, list) and all(isinstance(x, str) for x in dests)
+        except (OSError, ValueError, KeyError, AssertionError):
+            continue                                          # not readable: leave it alone rather than guess
+        if not (d / "committed").exists():
+            if (d / "installing").exists():
+                for x in dests:
+                    Path(x).unlink(missing_ok=True)
+            for f in [f for f in d.iterdir() if f.name.isdigit() and int(f.name) < len(dests)]:
+                os.replace(f, dests[int(f.name)])
+            print("note: finished an interrupted earlier run in %s - the previous files are back" % folder, file=sys.stderr)
+        shutil.rmtree(d, ignore_errors=True)
 
 
 def refuse_inputs(inputs, outputs):
@@ -152,9 +180,35 @@ def rmtree_force(folder):
     shutil.rmtree(folder)
 
 
+def need_picture(path):
+    """An input must be an existing file: say so in plain words instead of an operating-system error."""
+    if Path(path).is_dir():
+        sys.exit("error: %s is a folder, not a picture" % path)
+    if not Path(path).exists():
+        sys.exit("error: %s does not exist" % path)
+
+
 def need_folder_of(path):
+    """An output must have a folder to go to and, if it already exists, be writable - before anything is touched."""
     if not Path(path).resolve().parent.is_dir():
         sys.exit("error: the folder for %s does not exist" % path)
+    if Path(path).is_file() and not os.access(path, os.W_OK):
+        sys.exit("error: %s is read-only - nothing was changed" % path)
+
+
+def oserror_message(e):
+    """Plain wording for the operating-system errors people actually meet; None for anything else."""
+    names = [n for n in (getattr(e, "filename2", None), getattr(e, "filename", None)) if n and ".pixelcut" not in str(n)]
+    name = names[0] if names else (e.filename or "a file")
+    if isinstance(e, FileNotFoundError):
+        return "error: cannot find %s" % name
+    if isinstance(e, IsADirectoryError):
+        return "error: %s is a folder, not a picture" % name
+    if isinstance(e, (FileExistsError, NotADirectoryError)):
+        return "error: %s is a file, not a folder (or the other way round) - choose another path" % name
+    if isinstance(e, PermissionError):
+        return "error: cannot write %s (read-only, or in use by another program)" % name
+    return None
 
 
 def save_atomic(img, path):
@@ -191,6 +245,7 @@ def write_journal(folder, names):
 def open_upright(path):
     """Image.open plus the camera's rotation: a phone photo is stored sideways with an 'Orientation' tag, viewers turn it - so do we
     (with a notice), otherwise the result would not look like what the person sees."""
+    need_picture(path)
     im = Image.open(path)
     try:
         orient = im.getexif().get(274, 1)
@@ -408,7 +463,7 @@ def read_label_map(path, w, h):
         im.load()
     except Exception as e:
         sys.exit("--from-labels: cannot read %s (%s)" % (path, (str(e).strip().splitlines() or [type(e).__name__])[0]))
-    if im.format in ("JPEG", "MPO", "WEBP") or str(im.info.get("compression", "")).lower() in ("jpeg", "tiff_jpeg", "webp", "tiff_webp", "jpeg2000"):
+    if im.format in ("JPEG", "MPO", "WEBP", "JPEG2000") or str(im.info.get("compression", "")).lower() in ("jpeg", "tiff_jpeg", "webp", "tiff_webp", "jpeg2000"):
         sys.exit("--from-labels: %s is lossy (%s) - its grey values are not the part numbers any more; save the map as PNG" % (path, im.format))
     if im.mode in ("RGB", "RGBA", "LA", "F", "CMYK", "YCbCr", "LAB", "HSV"):
         sys.exit("--from-labels needs a grey picture (one number per pixel), not a colour one - %s is %s" % (path, im.mode))
@@ -760,12 +815,20 @@ def find_chrome():
 def cmd_trace(a):
     """Redraw the picture as vector shapes (vtracer). Approximate by nature: use `compare` to see how far it is from the original."""
     import vtracer
-    if not Path(a.input).is_file():
-        sys.exit("error: %s does not exist" % a.input)
+    need_picture(a.input)
     if not (0 <= a.speckle <= 128 and 1 <= a.colors <= 8 and 0 <= a.layers <= 255):
         sys.exit("--speckle must be 0..128, --colors 1..8, --layers 0..255")
-    if not Path(a.output).resolve().parent.is_dir():
-        sys.exit("error: the folder for %s does not exist" % a.output)
+    if Path(a.output).resolve() == Path(a.input).resolve():
+        sys.exit("error: the SVG must be a different file than the input")
+    if a.render and Path(a.render).resolve() in (Path(a.input).resolve(), Path(a.output).resolve()):
+        sys.exit("error: --render must be a different file than the input and the SVG")
+    if Path(a.output).suffix.lower() != ".svg":
+        sys.exit("error: trace writes an SVG - name the output *.svg (not %s)" % (Path(a.output).suffix or "without an ending"))
+    if a.render and Path(a.render).suffix.lower() != ".png":
+        sys.exit("error: --render writes a PNG - name it *.png (not %s)" % (Path(a.render).suffix or "without an ending"))
+    need_folder_of(a.output)
+    if a.render:
+        need_folder_of(a.render)
     here = Path(a.input).resolve()
     if Path(a.output).resolve() == here:
         sys.exit("error: the SVG must be a different file than the input")
@@ -878,6 +941,7 @@ def cmd_upscale(a):
     import subprocess
     if not 1 <= a.scale <= 8:
         sys.exit("--scale must be a whole number from 1 to 8")
+    need_picture(a.input)
     refuse_inputs([a.input], [a.output])
     need_folder_of(a.output)
     if a.no_ai:
@@ -887,12 +951,19 @@ def cmd_upscale(a):
         return lanczos_upscale(a, "no build for this machine")
     target = Path(a.output).resolve()
     work, tmp = scratch_beside(target)                        # the engine writes into a private folder beside the target; only a finished file replaces it
+    engine_ok = target.suffix.lower() in (".png", ".jpg", ".jpeg", ".webp")   # the engine writes only these
+    if not engine_ok:
+        tmp = work / "engine.png"                             # other endings (.tif, .bmp): engine -> png, then converted
     try:
         subprocess.run([exe, "-i", str(Path(a.input).resolve()), "-o", str(tmp), "-n", a.model, "-s", str(a.scale)],
                        check=True, cwd=str(Path(exe).parent), capture_output=True, timeout=1800)
         if not tmp.is_file() or tmp.stat().st_size == 0:
             raise OSError("the engine produced no picture")
-        os.replace(tmp, target)
+        if engine_ok:
+            os.replace(tmp, target)
+        else:
+            with Image.open(tmp) as made:
+                save_atomic(made.copy(), target)
     except subprocess.TimeoutExpired:
         return lanczos_upscale(a, "the engine did not finish in 30 minutes")
     except OSError as e:
@@ -992,10 +1063,8 @@ def main(argv=None):
     except BaseException as e:                                # includes pyo3 PanicException, which is not an Exception
         if os.environ.get("PIXELCUT_DEBUG"):
             raise
-        if isinstance(e, FileNotFoundError):
-            sys.exit("error: cannot find %s" % (e.filename or "a file"))
-        if isinstance(e, (FileExistsError, NotADirectoryError)):
-            sys.exit("error: %s is a file, not a folder (or the other way round) - choose another path" % (e.filename or "the path"))
+        if isinstance(e, OSError) and oserror_message(e):
+            sys.exit(oserror_message(e))
         sys.exit("error: %s (set PIXELCUT_DEBUG=1 for the full trace)" % (str(e).strip().splitlines() or [type(e).__name__])[0])
 
 
@@ -1037,6 +1106,8 @@ def _run(cmd, positional, opts):
     except (KeyboardInterrupt, PixelcutError):
         raise
     except BaseException as e:                                # same net as the command line (pyo3 panics are not Exceptions)
+        if isinstance(e, OSError) and oserror_message(e):
+            raise PixelcutError(hint(oserror_message(e).removeprefix("error: "))) from e
         raise PixelcutError(hint((str(e).strip().splitlines() or [type(e).__name__])[0])) from e
     return out.getvalue()
 
@@ -1103,8 +1174,13 @@ def trace(input, output, **options):
 
 
 def upscale(input, output, **options):
-    """Upscale (options: scale, model, bin, no_ai). Returns the output path."""
-    _run("upscale", [input, output], options)
+    """Upscale (options: scale, model, bin, no_ai). Returns the output path. If the AI engine cannot run, a plain Lanczos resize is
+    made instead and a UserWarning says so (the command line prints the same sentence)."""
+    import warnings
+    said = _run("upscale", [input, output], options)
+    fell_back = next((ln for ln in said.splitlines() if "plain Lanczos" in ln), None)
+    if fell_back and not options.get("no_ai"):
+        warnings.warn(fell_back, UserWarning, stacklevel=2)
     return Path(output)
 
 
