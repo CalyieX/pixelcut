@@ -32,7 +32,7 @@ import numpy as np
 from PIL import Image, ImageOps
 
 
-__version__ = "1.6.11"
+__version__ = "1.6.12"
 PART_NAME = re.compile(r"part_(0|[1-9]\d*)\.png")                  # exactly the names split writes: no leading zeros
 LOSSLESS = (".png", ".tif", ".tiff")
 
@@ -904,9 +904,11 @@ def _cmd_join(a, held):
             sys.exit("error: %s is being written (or a split was interrupted) - run split again, or wait until it has finished" % a.parts)
     manifest = Path(a.parts) / "parts.json"
     size = None
+    manifest_bytes = None
     if manifest.exists():                                     # the manifest says which parts belong together - all of them are needed
         try:
-            m = json.loads(manifest.read_text())
+            manifest_bytes = manifest.read_bytes()            # kept: it is checked again after reading, like the parts
+            m = json.loads(manifest_bytes.decode("utf-8"))
             n = len(m["parts"])
             size = tuple(m["size"])
             assert len(size) == 2 and all(isinstance(v, int) and v > 0 for v in size) and n > 0
@@ -939,10 +941,10 @@ def _cmd_join(a, held):
     def digest(f):
         return hashlib.sha256(Path(f).read_bytes()).hexdigest()
     data = [f.read_bytes() for f in files]                    # every part is read once, into memory
-    before = [hashlib.sha256(d).hexdigest() for d in data]
+    before = [hashlib.sha256(d).hexdigest() for d in data] + [hashlib.sha256(manifest_bytes).hexdigest() if manifest_bytes is not None else None]
     out = over_white(np.array(Image.open(io.BytesIO(d)).convert("RGBA")) for d in data)
     try:                                                      # what is on disk now must be exactly what we used: a split that swapped parts and
-        after = [digest(f) for f in files]                    # rolled back leaves the same names, sizes and times, only the content tells
+        after = [digest(f) for f in files] + [digest(manifest) if manifest_bytes is not None and manifest.exists() else None]   # (rolled back: same names, sizes, times)
     except OSError:
         after = None
     if after != before or any((Path(a.parts) / w).exists() for w in (".pixelcut_old", ".pixelcut_new", DONE)):
@@ -1008,9 +1010,13 @@ def cmd_trace(a):
         sys.exit("error: the SVG must be a different file than the input")
     if a.render and Path(a.render).resolve() in (here, Path(a.output).resolve()):
         sys.exit("error: --render must be a different file than the input and the SVG")
+    pic = open_upright(a.input)                               # turned upright like a viewer shows it; Pillow decides whether it is readable
+    w, h = pic.size
     work, tmp_svg = scratch_beside(a.output)
     try:
-        vtracer.convert_image_to_svg_py(a.input, str(tmp_svg), colormode="color", hierarchical="stacked", mode="spline",
+        src = work / "input.png"                              # vtracer gets exactly the pixels we decoded, not a second reading of the file
+        pic.convert("RGBA").save(src)
+        vtracer.convert_image_to_svg_py(str(src), str(tmp_svg), colormode="color", hierarchical="stacked", mode="spline",
                                         filter_speckle=a.speckle, color_precision=a.colors, layer_difference=a.layers,
                                         corner_threshold=60, length_threshold=3.5, splice_threshold=45, path_precision=3)
         os.replace(tmp_svg, Path(a.output).resolve())
@@ -1026,7 +1032,6 @@ def cmd_trace(a):
         chrome = find_chrome()
         if not chrome:
             sys.exit("--render needs Chrome/Edge/Brave")
-        w, h = Image.open(a.input).size
         tmp = tempfile.TemporaryDirectory()
         t = Path(tmp.name)
         (t / "p.html").write_text('<html><body style="margin:0;background:#fff"><img src="%s" width=%d height=%d></body></html>'

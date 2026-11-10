@@ -1484,3 +1484,35 @@ def test_join_without_lock_notices_a_swap_that_was_rolled_back(tmp_path, monkeyp
     monkeypatch.setattr(pixelcut, "over_white", lambda it: real(swapping(it)))
     with pytest.raises(pixelcut.PixelcutError, match="changed while"):
         pixelcut.join(out, tmp_path / "j.png")
+
+
+def test_trace_turns_an_exif_rotated_photo_upright_and_reports_unreadable_files(tmp_path):
+    import pixelcut
+    im = Image.new("RGB", (120, 80), (200, 30, 30))
+    ex = im.getexif()
+    ex[274] = 6
+    im.save(tmp_path / "rot.jpg", exif=ex)
+    pixelcut.trace(tmp_path / "rot.jpg", tmp_path / "r.svg")
+    svg = (tmp_path / "r.svg").read_text()
+    assert 'width="80"' in svg and 'height="120"' in svg
+    (tmp_path / "bad.png").write_bytes((tmp_path / "r.svg").read_bytes()[:50])
+    with pytest.raises(pixelcut.PixelcutError) as e:
+        pixelcut.trace(tmp_path / "bad.png", tmp_path / "b.svg")
+    assert "unwrap" not in str(e.value) and "No image file" not in str(e.value)
+
+
+def test_join_notices_a_changed_manifest(tmp_path, monkeypatch):
+    import pixelcut
+    monkeypatch.setattr(pixelcut, "_lock", lambda f: "unavailable")
+    out = tmp_path / "p"
+    pixelcut.split(_mk(tmp_path), out, grid="2x2", opaque=True)
+    real = pixelcut.over_white
+    def touching(it):
+        for k, im in enumerate(it):
+            if k == 1:
+                m = out / "parts.json"
+                m.write_text(m.read_text() + " ")
+            yield im
+    monkeypatch.setattr(pixelcut, "over_white", lambda it: real(touching(it)))
+    with pytest.raises(pixelcut.PixelcutError, match="changed while"):
+        pixelcut.join(out, tmp_path / "j.png")
