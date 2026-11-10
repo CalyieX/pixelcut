@@ -1550,3 +1550,33 @@ def test_upscale_hands_the_engine_upright_pixels(tmp_path, monkeypatch):
     exe.write_bytes(b"")
     pixelcut.upscale(tmp_path / "rot.jpg", tmp_path / "u.png", scale=2, bin=str(exe))
     assert seen["size"] == (100, 200)
+
+
+def test_lanczos_upscale_keeps_16_bit_grey_and_16_bit_transparency_is_scaled_not_cut(tmp_path, capsys):
+    import pixelcut
+    g = (np.linspace(0, 65535, 32 * 32).reshape(32, 32)).astype("uint16")
+    Image.fromarray(g).save(tmp_path / "g16.png")
+    pixelcut.upscale(tmp_path / "g16.png", tmp_path / "u.png", scale=2, no_ai=True)
+    mean = np.array(Image.open(tmp_path / "u.png").convert("L")).mean()
+    assert 100 < mean < 150                                        # was ~254: one white surface
+    import cv2
+    rgba = np.zeros((16, 16, 4), np.uint16)
+    rgba[..., :3] = 40000
+    rgba[..., 3] = 65535
+    cv2.imwrite(str(tmp_path / "a16.png"), rgba)
+    capsys.readouterr()
+    out = pixelcut.decoded_8bit(tmp_path / "a16.png")
+    assert out.mode == "RGBA" and np.array(out)[0, 0, 0] == 156 and np.array(out)[0, 0, 3] == 255
+    assert "16 bit" in capsys.readouterr().err
+
+
+def test_join_accepts_a_hand_made_manifest_without_centre_and_angles(tmp_path):
+    import pixelcut
+    out = tmp_path / "p"
+    pixelcut.split(_mk(tmp_path), out, grid="2x2", opaque=True)
+    m = json.loads((out / "parts.json").read_text())
+    m.pop("centre", None)
+    m["parts"] = [{} for _ in m["parts"]]
+    (out / "parts.json").write_text(json.dumps(m))
+    pixelcut.join(out, tmp_path / "j.png")
+    assert (tmp_path / "j.png").exists()

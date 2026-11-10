@@ -32,7 +32,7 @@ import numpy as np
 from PIL import Image, ImageOps
 
 
-__version__ = "1.6.13"
+__version__ = "1.6.14"
 PART_NAME = re.compile(r"part_(0|[1-9]\d*)\.png")                  # exactly the names split writes: no leading zeros
 LOSSLESS = (".png", ".tif", ".tiff")
 
@@ -386,6 +386,13 @@ def decoded_8bit(path):
         sys.exit("image too large (%d x %d = %d MP, limit 150 MP)" % (pic.width, pic.height, pic.width * pic.height // 1_000_000))
     if getattr(pic, "n_frames", 1) > 1:
         print("note: %s has %d frames - only the first one is used" % (path, pic.n_frames), file=sys.stderr)
+    if Path(path).suffix.lower() in (".png", ".tif", ".tiff"):                            # Pillow cuts 16 bit per channel with transparency
+        deep = cv2.imdecode(np.fromfile(str(path), np.uint8), cv2.IMREAD_UNCHANGED)
+        if deep is not None and deep.dtype == np.uint16 and deep.ndim == 3 and deep.shape[2] == 4:
+            print("note: %s is 16 bit per channel - scaled to 8 bit, so the result is not exact for the full range" % path, file=sys.stderr)
+            deep = upright_array(deep, getattr(pic, "pixelcut_orientation", 1))
+            rgba = np.clip(deep.astype(np.float64) / 257.0 + 0.5, 0, 255).astype(np.uint8)[:, :, [2, 1, 0, 3]]
+            return Image.fromarray(np.ascontiguousarray(rgba), "RGBA")
     return pic.convert("RGBA")
 
 
@@ -926,10 +933,12 @@ def _cmd_join(a, held):
         try:
             manifest_bytes = manifest.read_bytes()            # kept: it is checked again after reading, like the parts
             m = json.loads(manifest_bytes.decode("utf-8"))
-            names = manifest_files(m)                         # the same check split --from-labels/compare use
-            n = len(names)
-            size = tuple(m["size"])
-            assert all(PART_NAME.fullmatch(x) for x in names)
+            size = tuple(m["size"])                           # join needs only these: hand-made and older manifests may lack centre/angles
+            assert isinstance(m["parts"], list) and m["parts"] and len(size) == 2                 and all(isinstance(v, int) and not isinstance(v, bool) and v > 0 for v in size)
+            n = len(m["parts"])
+            names = m.get("files") or ["part_%d.png" % k for k in range(n)]
+            assert isinstance(names, list) and len(names) == n == len(set(names))                 and all(isinstance(x, str) and PART_NAME.fullmatch(x) for x in names)
+            assert all(isinstance(x, dict) for x in m["parts"])
         except (ValueError, KeyError, TypeError, AssertionError, AttributeError):
             sys.exit("parts.json is damaged (needs 'size' [w,h], 'parts' and matching 'files')")
         files = [Path(a.parts) / x for x in names]
@@ -1124,8 +1133,7 @@ def ensure_esrgan():
 def lanczos_upscale(a, why):
     """Fallback without AI: plain Lanczos resize. Smooth, but no invented detail."""
     print("Real-ESRGAN not usable here (%s) - using plain Lanczos resize instead (no AI detail)." % why)
-    im = open_upright(a.input)
-    im = im.convert("RGBA" if (im.mode in ("RGBA", "LA", "PA") or "transparency" in im.info) else "RGB")   # keep transparency
+    im = decoded_8bit(a.input)                                # the same pixels every other command works on (16 bit, EXIF, CMYK ...)
     save_atomic(im.resize((im.width * a.scale, im.height * a.scale), Image.LANCZOS), a.output)
     print("wrote", a.output)
 
