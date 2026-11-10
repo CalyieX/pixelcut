@@ -32,7 +32,7 @@ import numpy as np
 from PIL import Image, ImageOps
 
 
-__version__ = "1.7.0"
+__version__ = "1.7.1"
 PART_NAME = re.compile(r"part_(0|[1-9]\d*)\.png")                  # exactly the names split writes: no leading zeros
 LOSSLESS = (".png", ".tif", ".tiff")
 
@@ -1340,23 +1340,36 @@ def build_parser(parser_class=argparse.ArgumentParser):
 BATCH_PICTURES = (".png", ".jpg", ".jpeg", ".webp", ".tif", ".tiff", ".bmp", ".gif")
 BATCH_OUTPUT = {"alpha": ".png", "labels": ".png", "trace": ".svg", "upscale": None,          # None: the input's ending, "dir": one folder per picture
                 "split": "dir", "key": "dir"}
+BATCH_DIR_DONE = {"split": ("parts.json",), "key": ("base.png", "element.png", "preview.png")}
 
 
 def batch_pictures(folder, recursive, not_inside=None):
+    """Pictures of a folder, sorted. Hidden files/folders are skipped, and so are folders that are links/junctions (they point somewhere
+    else - and may point back into this folder), and the output folder when it lies inside the input folder."""
     found = []
-    for f in sorted(Path(folder).rglob("*") if recursive else Path(folder).glob("*")):
-        rel = f.relative_to(folder)
-        if any(part.startswith(".") for part in rel.parts) or (not_inside and not_inside in f.resolve().parents):
-            continue
-        if f.is_file() and f.suffix.lower() in BATCH_PICTURES:
-            found.append(f)
+    for root, dirs, files in os.walk(folder, followlinks=False):
+        root = Path(root)
+        dirs[:] = sorted(d for d in dirs if recursive and not d.startswith(".") and not link_like(root / d)
+                         and not (not_inside and (root / d).resolve() == not_inside))
+        found += [root / f for f in sorted(files) if not f.startswith(".") and Path(f).suffix.lower() in BATCH_PICTURES]
     return found
+
+
+def batch_is_done(command, target):
+    """A finished output, not just an existing one: an interrupted split leaves a folder behind that must be done again."""
+    if command in BATCH_DIR_DONE:
+        return (target.is_dir() and all((target / n).is_file() for n in BATCH_DIR_DONE[command])
+                and not any((target / w).exists() for w in (".pixelcut_new", ".pixelcut_old", DONE)))
+    return target.exists()
 
 
 def cmd_batch(a):
     """One command over every picture of a folder. Each picture is its own run: one bad file never stops the others."""
+    import warnings
     if a.command not in BATCH_OUTPUT:
         sys.exit("error: batch works with %s (not %s)" % (", ".join(sorted(BATCH_OUTPUT)), a.command))
+    if any(r == "--render" or r.startswith("--render=") for r in a.rest):
+        sys.exit("error: --render names one file - every picture would overwrite it; render the SVGs afterwards")
     src, dst = Path(a.input_dir), Path(a.output_dir)
     if not src.is_dir():
         sys.exit("error: %s is not a folder" % src)
@@ -1364,42 +1377,57 @@ def cmd_batch(a):
         sys.exit("error: the output folder must be a different folder than the input folder")
     if dst.exists() and not dst.is_dir():
         sys.exit("error: %s exists and is not a folder" % dst)
-    pictures = batch_pictures(src, a.recursive, dst.resolve())                              # an output folder inside the input folder is not input
+    try:                                                      # a wrong option is wrong for every picture: say so once, before anything is written
+        build_parser(_ApiParser).parse_args([a.command, "in.png", "out"] + list(a.rest))
+    except PixelcutError as e:
+        sys.exit("error: %s" % e)
+    inside = dst.resolve() if src.resolve() in dst.resolve().parents else None
+    pictures = batch_pictures(src, a.recursive, inside)
     if not pictures:
-        sys.exit("error: no pictures (%s) in %s" % (", ".join(BATCH_PICTURES), src))
-    dst.mkdir(parents=True, exist_ok=True)
-    kind, used, done, skipped, failed = BATCH_OUTPUT[a.command], {}, 0, 0, []
-    for n, pic in enumerate(pictures, 1):
+        sys.exit("error: no pictures (%s) in %s%s" % (", ".join(BATCH_PICTURES), src, "" if a.recursive else " (without --recursive only the folder itself is read)"))
+    kind = BATCH_OUTPUT[a.command]
+    plan = []                                                 # (picture, relative output name)
+    for pic in pictures:
         rel = pic.relative_to(src)
-        name = rel.with_suffix("") if kind == "dir" else rel.with_suffix(kind or pic.suffix)
-        target = dst / name
-        label = "[%d/%d] %s" % (n, len(pictures), rel)
-        if str(name).lower() in used:                         # a.png and a.jpg would write the same output
-            failed.append((str(rel), "output name %s is already used by %s" % (name, used[str(name).lower()])))
-            print("%s: failed (same output as %s)" % (label, used[str(name).lower()]))
+        plan.append((pic, rel.with_suffix("") if kind == "dir" else rel.with_suffix(kind or pic.suffix)))
+    names = {}
+    for pic, name in plan:
+        names.setdefault(name.as_posix().lower(), []).append(pic.relative_to(src).as_posix())
+    dst.mkdir(parents=True, exist_ok=True)
+    done, skipped, failed = 0, 0, []
+    for n, (pic, name) in enumerate(plan, 1):
+        rel = pic.relative_to(src)
+        label = "[%d/%d] %s" % (n, len(plan), rel)
+        key = name.as_posix().lower()
+        clash = names[key][0] if names[key][0] != rel.as_posix() else None
+        if clash is None and kind == "dir":                   # a.png (-> folder a) and a/b.png (-> a/b) would share a folder
+            clash = next((names[p.as_posix().lower()][0] for p in name.parents if p.as_posix().lower() in names and str(p) != "."), None)
+        if clash:
+            failed.append((rel.as_posix(), "its output %s is also the output of %s" % (name.as_posix(), clash)))
+            print("%s: failed (same output as %s)" % (label, clash))
             continue
-        used[str(name).lower()] = str(rel)
-        if target.exists() and not a.overwrite:
+        target = dst / name
+        if batch_is_done(a.command, target) and not a.overwrite:
             skipped += 1
-            print("%s: skipped (%s exists, use --overwrite)" % (label, name))
+            print("%s: skipped (%s exists, use --overwrite)" % (label, name.as_posix()))
             continue
         try:
             target.parent.mkdir(parents=True, exist_ok=True)
-            import warnings
             with warnings.catch_warnings(record=True) as notes:
                 warnings.simplefilter("always")
-                _run(a.command, [pic, target, *a.rest], {})
+                said = _run(a.command, [pic, target, *a.rest], {})
             done += 1
-            print("%s: ok%s" % (label, "".join(" (%s)" % w.message for w in notes)))
-        except PixelcutError as e:
-            msg = str(e).splitlines()[0]
-            if n == 1 and not done and ("unrecognized arguments" in msg or "required" in msg or "invalid" in msg):
-                sys.exit("error: %s" % msg)                   # a wrong option is wrong for every picture: say so once
-            failed.append((str(rel), msg))
+            extra = [ln for ln in said.splitlines() if ln.strip() and not ln.startswith(("wrote", "rendered", "joined"))]
+            print("%s: ok%s" % (label, "".join(" (%s)" % w.message for w in notes if issubclass(w.category, UserWarning))))
+            for ln in extra:
+                print("    " + ln)
+        except (PixelcutError, OSError) as e:
+            msg = (oserror_message(e).removeprefix("error: ") if isinstance(e, OSError) and oserror_message(e) else str(e)).splitlines()[0]
+            failed.append((rel.as_posix(), msg))
             print("%s: failed (%s)" % (label, msg))
     print("batch %s: %d done, %d skipped, %d failed" % (a.command, done, skipped, len(failed)))
     if failed:
-        sys.exit("error: %d of %d pictures failed:\n  %s" % (len(failed), len(pictures), "\n  ".join("%s: %s" % f for f in failed)))
+        sys.exit("error: %d of %d pictures failed:\n  %s" % (len(failed), len(plan), "\n  ".join("%s: %s" % f for f in failed)))
 
 
 def main(argv=None):
@@ -1554,7 +1582,7 @@ def upscale(input, output, **options):
     return Path(output)
 
 
-__all__ = ["__version__", "PixelcutError", "alpha", "split", "labels", "join", "key", "compare", "trace", "upscale"]
+__all__ = ["__version__", "PixelcutError", "alpha", "split", "labels", "join", "key", "compare", "trace", "upscale", "batch"]
 
 
 if __name__ == "__main__":

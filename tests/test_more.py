@@ -1798,7 +1798,65 @@ def test_batch_refuses_wrong_commands_same_folder_and_names_clashes(tmp_path):
     with pytest.raises(pixelcut.PixelcutError, match="different folder"):
         pixelcut.batch("alpha", src, src)
     Image.new("RGB", (5, 5)).save(src / "a.jpg")                    # a.png and a.jpg would both become a.png
-    with pytest.raises(pixelcut.PixelcutError, match="already used"):
+    with pytest.raises(pixelcut.PixelcutError, match="also the output of"):
         pixelcut.batch("alpha", src, tmp_path / "o2")
     with pytest.raises(pixelcut.PixelcutError, match="unrecognized arguments"):
         pixelcut.batch("alpha", src, tmp_path / "o3", bogus=True)               # a wrong option is reported once, not per picture
+
+
+def test_batch_does_a_half_finished_split_folder_again(tmp_path):
+    import pixelcut
+    src = _batch_folder(tmp_path)
+    (src / "bad.png").unlink()
+    (tmp_path / "sp" / "a" / ".pixelcut_new").mkdir(parents=True)            # what Ctrl-C in the middle of a split leaves behind
+    out = pixelcut.batch("split", src, tmp_path / "sp", grid="2x2", opaque=True)
+    assert "skipped" not in out.splitlines()[0] and (tmp_path / "sp" / "a" / "parts.json").exists()
+    assert not (tmp_path / "sp" / "a" / ".pixelcut_new").exists()
+    assert "2 skipped" in pixelcut.batch("split", src, tmp_path / "sp", grid="2x2", opaque=True)    # a finished one is left alone
+
+
+def test_batch_does_not_follow_folder_links_and_skips_hidden_files(tmp_path):
+    import pixelcut, subprocess
+    src = _batch_folder(tmp_path)
+    (src / "bad.png").unlink()
+    Image.new("RGB", (5, 5)).save(src / ".hidden.png")
+    link = src / "sub" / "loop"
+    r = subprocess.run(["cmd", "/c", "mklink", "/J", str(link), str(src)], capture_output=True) if os.name == "nt" else None
+    if os.name != "nt":
+        os.symlink(src, link, target_is_directory=True)
+    elif r.returncode != 0:
+        pytest.skip("cannot create a junction here")
+    out = pixelcut.batch("alpha", src, tmp_path / "o", recursive=True)
+    assert "3 done" in out and "loop" not in out and ".hidden" not in out
+
+
+def test_batch_keeps_going_when_one_output_cannot_be_written(tmp_path):
+    import pixelcut
+    src = _batch_folder(tmp_path)
+    (src / "bad.png").unlink()
+    (tmp_path / "o").mkdir()
+    (tmp_path / "o" / "sub").write_bytes(b"i am a file, not a folder")        # sub/c.png cannot get its folder
+    with pytest.raises(pixelcut.PixelcutError, match=r"1 of 3 pictures failed:\n  sub/c.png"):
+        pixelcut.batch("alpha", src, tmp_path / "o", recursive=True)
+    assert (tmp_path / "o" / "a.png").exists() and (tmp_path / "o" / "b.png").exists()
+
+
+def test_batch_shows_the_notes_of_the_single_runs_and_refuses_render(tmp_path):
+    import pixelcut
+    src = _batch_folder(tmp_path)
+    (src / "bad.png").unlink()
+    out = pixelcut.batch("upscale", src, tmp_path / "u", scale=2, bin=str(tmp_path / "nonexistent.exe"))
+    assert "plain Lanczos" in out                                          # the fallback is visible, not just "ok"
+    with pytest.raises(pixelcut.PixelcutError, match="--render"):
+        pixelcut.batch("trace", src, tmp_path / "t", render=str(tmp_path / "r.png"))
+
+
+def test_batch_names_a_folder_against_file_clash_and_is_in_all(tmp_path):
+    import pixelcut
+    src = _batch_folder(tmp_path)
+    (src / "bad.png").unlink()
+    (src / "a").mkdir()
+    Image.new("RGB", (8, 8)).save(src / "a" / "b.png")
+    with pytest.raises(pixelcut.PixelcutError, match="also the output of a.png"):
+        pixelcut.batch("split", src, tmp_path / "sp", recursive=True, grid="2x2", opaque=True)
+    assert "batch" in pixelcut.__all__

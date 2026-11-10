@@ -172,7 +172,7 @@ python pixelcut.py batch split  fotos/ teile/ --grid 4x3 --opaque
 python pixelcut.py batch --recursive --overwrite trace logos/ svg/
 ```
 
-`batch` führt `alpha`, `labels`, `trace`, `upscale`, `split` oder `key` für jedes Bild eines Ordners aus. Alles hinter dem Ordnernamen sind die Optionen des Befehls. Jedes Bild läuft für sich: Eine kaputte Datei stoppt die anderen nicht, sie wird am Ende mit Namen gemeldet (Exit-Code 1). Bestehende Ausgaben werden **nicht** ersetzt, sondern übersprungen, außer mit `--overwrite`. `--recursive` nimmt auch Unterordner mit und behält die Ordnerstruktur. `split` und `key` legen pro Bild einen Unterordner an (`teile/foto1/part_0.png …`). Gleiche Ausgabenamen (`a.png` und `a.jpg`) werden als Fehler gemeldet statt still überschrieben. Aus Python: `pixelcut.batch("upscale", "fotos", "gross", scale=2, no_ai=True)`. Die Batch-Optionen `--recursive` und `--overwrite` stehen **vor** dem Befehlsnamen.
+`batch` führt `alpha`, `labels`, `trace`, `upscale`, `split` oder `key` für jedes Bild eines Ordners aus. Alles hinter dem Ordnernamen sind die Optionen des Befehls. Jedes Bild läuft für sich: Eine kaputte Datei stoppt die anderen nicht, sie wird am Ende mit Namen gemeldet (Exit-Code 1). Bestehende Ausgaben werden **nicht** ersetzt, sondern übersprungen, außer mit `--overwrite`. `--recursive` nimmt auch Unterordner mit und behält die Ordnerstruktur. `split` und `key` legen pro Bild einen Unterordner an (`teile/foto1/part_0.png …`). Gleiche Ausgabenamen (`a.png` und `a.jpg`) werden als Fehler gemeldet statt still überschrieben. Aus Python: `pixelcut.batch("upscale", "fotos", "gross", scale=2, no_ai=True)`. Die Batch-Optionen `--recursive` und `--overwrite` stehen **vor** dem Befehlsnamen. Versteckte Dateien und Ordner (Name beginnt mit `.`) sowie Ordner, die Links oder Junctions sind, werden übersprungen. Ein halbfertiger Ausgabeordner (zum Beispiel nach Strg+C bei `split`) gilt nicht als fertig und wird beim nächsten Lauf neu gemacht. Hinweise der einzelnen Läufe (etwa der Wechsel auf Lanczos bei `upscale`) stehen unter dem Bild. `--render` ist bei `batch trace` nicht erlaubt, weil jedes Bild dieselbe Datei überschreiben würde.
 
 ## Was pixelcut NICHT kann
 
@@ -238,7 +238,7 @@ pip install -e ".[test]"
 pytest -q
 ```
 
-215 Tests. Sie prüfen die gespeicherten Dateien: Rundlauf split + join ist exakt (Zeichnung, Foto, gerade und Zickzack), die Teile überlappen nicht, Polygone, Winkel, Mitte, Größe und dickster Punkt stimmen mit den Teilen überein, `compare`, `key` und `alpha` rechnen richtig, `join` verweigert fehlende oder falsch große Teile, `split` fasst fremde Dateien nicht an, und schlechte Eingaben ergeben eine klare Fehlerzeile. Eingebaute Fehler (Mutationen) werden gefangen.
+220 Tests. Sie prüfen die gespeicherten Dateien: Rundlauf split + join ist exakt (Zeichnung, Foto, gerade und Zickzack), die Teile überlappen nicht, Polygone, Winkel, Mitte, Größe und dickster Punkt stimmen mit den Teilen überein, `compare`, `key` und `alpha` rechnen richtig, `join` verweigert fehlende oder falsch große Teile, `split` fasst fremde Dateien nicht an, und schlechte Eingaben ergeben eine klare Fehlerzeile. Eingebaute Fehler (Mutationen) werden gefangen.
 
 ---
 
