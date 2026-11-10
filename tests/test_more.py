@@ -774,7 +774,7 @@ def test_publish_interrupt_right_after_moving_an_old_file_aside_loses_nothing(tm
         monkeypatch.undo()
         state = {n: (d / n).read_text() if (d / n).exists() else None for n in names}
         assert set(state.values()) in ({"old a", "old b", "old c"}, {"new a", "new b", "new c"}), (hit, state)
-        assert not list(d.glob(".pixelcut_*")) and not list(tmp_path.glob(".pixelcut_*")), hit
+        assert not [f for f in d.glob(".pixelcut_*") if f.name != ".pixelcut_lock"] and not list(tmp_path.glob(".pixelcut_*")), hit   # the lock file stays by design
 
 
 def test_publish_keeps_the_old_files_when_the_rollback_itself_fails(tmp_path, monkeypatch, capsys):
@@ -1237,18 +1237,47 @@ def _crashed_aside(folder, dests_names, installing=True, committed=False, dests_
     return aside
 
 
-def test_recovery_leaves_a_live_run_alone(tmp_path):
+def test_a_second_run_in_a_busy_folder_is_refused_for_split_and_key(tmp_path):
     import pixelcut
-    aside = _crashed_aside(tmp_path, ["a.png", "b.png"])
-    held = open(aside / "lock", "r+b")                              # another running pixelcut holds this lock
-    assert pixelcut._lock(held)
+    Image.new("RGB", (30, 30), "red").save(tmp_path / "o.png")
+    out = tmp_path / "o_parts"
+    cli("split", tmp_path / "o.png", out, "--grid", "2x1", "--opaque")
+    before = {f.name: f.read_bytes() for f in out.glob("part_*.png")}
+    held = []
+    assert pixelcut.lock_folder(out, held) is True               # a run of ours is "working" in this folder
     try:
-        pixelcut.recover_publish(tmp_path)
-        assert aside.exists() and (tmp_path / "a.png").read_bytes() == b"NEW-a.png"
+        r = cli("split", tmp_path / "o.png", out, "--grid", "2x1", "--opaque", check=False)
+        assert r.returncode != 0 and "another pixelcut run" in r.stderr
+        assert {f.name: f.read_bytes() for f in out.glob("part_*.png")} == before      # nothing touched
+        with pytest.raises(SystemExit):
+            pixelcut.lock_folder(out, [])                          # also not from inside the same process
     finally:
-        held.close()
-    pixelcut.recover_publish(tmp_path)                              # lock gone = run is dead: now it is recovered
-    assert not aside.exists() and (tmp_path / "a.png").read_bytes() == b"OLD-a.png"
+        for f in held:
+            f.close()
+    cli("split", tmp_path / "o.png", out, "--grid", "2x1", "--opaque")                 # free again
+
+
+def test_without_a_working_lock_recovery_touches_nothing_and_says_so(tmp_path, capsys):
+    import pixelcut
+    aside = _crashed_aside(tmp_path, ["a.png"])
+    pixelcut.recover_publish(tmp_path, locked=False)
+    assert aside.exists() and (tmp_path / "a.png").read_bytes() == b"NEW-a.png"
+    assert "cannot tell whether it is still running" in capsys.readouterr().err
+
+
+def test_half_written_publish_json_without_backups_is_removed(tmp_path):
+    import pixelcut
+    d = tmp_path / ".pixelcut_half"
+    d.mkdir()
+    (d / "publish.json").write_text('{"dests": ["')
+    pixelcut.recover_publish(tmp_path)
+    assert not d.exists()
+
+
+def test_read_only_image_formats_are_refused_as_output(tmp_path):
+    Image.new("RGB", (10, 10), "red").save(tmp_path / "o.png")
+    r = cli("upscale", tmp_path / "o.png", tmp_path / "x.psd", "--no-ai", check=False)
+    assert r.returncode != 0 and "cannot write .psd" in r.stderr and "DEBUG" not in r.stderr
 
 
 def test_two_overlapping_publishes_never_empty_the_folder(tmp_path):
