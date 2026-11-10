@@ -139,7 +139,7 @@ python pixelcut.py compare original.png nachbau.png
 # SSIM 1.0000   mean |diff| 0.000   max |diff| 0
 ```
 
-Ähnlichkeit (SSIM, 1,0 = identisch), mittlere und größte Pixelabweichung. Nutzbar für jedes Bildpaar, auch für Ergebnisse anderer Werkzeuge.
+Ähnlichkeit (SSIM, 1,0 = identisch), mittlere und größte Pixelabweichung. Nutzbar für jedes Bildpaar, auch für Ergebnisse anderer Werkzeuge. Speicherbedarf: etwa 55 Byte je Pixel, bei 99 MP also über 5 GB freier Arbeitsspeicher; bei weniger meldet `compare` das klar, ohne etwas zu verändern. Zum Vergleich: `split` braucht bei 99 MP rund 3,7 GB, `join` rund 5,2 GB (gemessen).
 
 ### 5. `key`: ein Element herausheben, verkleinern, in die Mitte setzen
 
