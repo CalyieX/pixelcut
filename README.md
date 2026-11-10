@@ -94,7 +94,7 @@ print(pixelcut.compare("bild.png", "zurueck.png"))   # {'ssim': 1.0, 'mean_diff'
 
 Funktionen: `alpha`, `split`, `labels`, `join`, `key`, `compare`, `trace`, `upscale`. Hinweis: Die Schnittstelle leitet während eines Aufrufs die Ausgabe des ganzen Prozesses um; in mehreren Threads gleichzeitig benutzen verschluckt fremde `print`-Zeilen. `verify` hat über die Schnittstelle keine Wirkung (die Zahlen werden nicht ausgegeben), nutze `compare`. Optionen heißen wie die Kommandozeilen-Flags, Bindestriche als Unterstriche (`only_inside=True`). Dieselben Prüfungen und Standardwerte wie in der Kommandozeile, nichts wird gedruckt, Fehler werden zu `pixelcut.PixelcutError`. Hinweise, die man nicht übersehen darf (zum Beispiel ein zurückgebliebenes Backup), kommen als `UserWarning`.
 
-**Zwei Läufe im selben Ordner:** `split` und `key` legen eine versteckte Sperrdatei `.pixelcut_lock` in den Ausgabeordner. Ein zweiter Lauf im selben Ordner bricht mit einer klaren Meldung ab, statt die Ergebnisse des ersten zu zerstören; `join` wartet ebenfalls, solange dort geschrieben wird. Die Datei darf bleiben, sie hält nichts fest, wenn kein Lauf aktiv ist. Wo das Dateisystem keine Sperren kann (manche Netzlaufwerke), fasst pixelcut fremde Sicherungsordner nicht an und sagt es. Nach einem harten Abbruch (Stromausfall, Prozess beendet) räumt der nächste Lauf eine halb fertige Ersetzung von selbst auf; Reste von Arbeitsordnern (`.pixelcut_xxxx`) kann man gefahrlos von Hand löschen, wenn gerade kein Lauf aktiv ist.
+**Zwei Läufe im selben Ordner:** `split` und `key` legen eine versteckte Sperrdatei `.pixelcut_lock` in den Ausgabeordner. Ein zweiter Lauf im selben Ordner bricht mit einer klaren Meldung ab, statt die Ergebnisse des ersten zu zerstören; `join` bricht ebenfalls mit der Bitte ab, es später noch einmal zu versuchen, solange dort geschrieben wird (und liefert nie ein Mischbild aus altem und neuem Satz). Die Datei darf bleiben, sie hält nichts fest, wenn kein Lauf aktiv ist. Wo das Dateisystem keine Sperren kann (manche Netzlaufwerke), fasst pixelcut fremde Sicherungsordner nicht an und sagt es. Nach einem harten Abbruch (Stromausfall, Prozess beendet) räumt der nächste Lauf eine halb fertige Ersetzung von selbst auf; Reste von Arbeitsordnern (`.pixelcut_xxxx`) kann man gefahrlos von Hand löschen, wenn gerade kein Lauf aktiv ist.
 
 ## Was pixelcut kann
 
@@ -225,7 +225,7 @@ pip install -e ".[test]"
 pytest -q
 ```
 
-186 Tests. Sie prüfen die gespeicherten Dateien: Rundlauf split + join ist exakt (Zeichnung, Foto, gerade und Zickzack), die Teile überlappen nicht, Polygone, Winkel, Mitte, Größe und dickster Punkt stimmen mit den Teilen überein, `compare`, `key` und `alpha` rechnen richtig, `join` verweigert fehlende oder falsch große Teile, `split` fasst fremde Dateien nicht an, und schlechte Eingaben ergeben eine klare Fehlerzeile. Eingebaute Fehler (Mutationen) werden gefangen.
+188 Tests. Sie prüfen die gespeicherten Dateien: Rundlauf split + join ist exakt (Zeichnung, Foto, gerade und Zickzack), die Teile überlappen nicht, Polygone, Winkel, Mitte, Größe und dickster Punkt stimmen mit den Teilen überein, `compare`, `key` und `alpha` rechnen richtig, `join` verweigert fehlende oder falsch große Teile, `split` fasst fremde Dateien nicht an, und schlechte Eingaben ergeben eine klare Fehlerzeile. Eingebaute Fehler (Mutationen) werden gefangen.
 
 ---
 

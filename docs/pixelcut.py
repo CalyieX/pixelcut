@@ -32,7 +32,7 @@ import numpy as np
 from PIL import Image, ImageOps
 
 
-__version__ = "1.6.8"
+__version__ = "1.6.9"
 PART_NAME = re.compile(r"part_(0|[1-9]\d*)\.png")                  # exactly the names split writes: no leading zeros
 LOSSLESS = (".png", ".tif", ".tiff")
 
@@ -123,7 +123,21 @@ def lock_folder(folder, held):
     state = _lock(f)
     if state == "busy":
         sys.exit("error: another pixelcut run is working in %s right now - wait until it has finished" % folder)
+    if state == "unavailable" and sys.platform != "emscripten":
+        print("note: this file system cannot lock folders - two pixelcut runs at once in %s would not be noticed" % folder, file=sys.stderr)
     return state == "ok"
+
+
+def folder_is_busy(folder):
+    """True if a live pixelcut run holds the folder lock. Creates nothing and needs no write access."""
+    path = Path(folder) / ".pixelcut_lock"
+    if not path.is_file():
+        return False
+    try:
+        with open(path, "rb") as probe:
+            return _lock(probe) == "busy"
+    except OSError:
+        return False
 
 
 def _write_atomic_text(path, text):
@@ -601,6 +615,8 @@ def cmd_split(a):
 
 
 def _cmd_split(a, held):
+    if folder_is_busy(a.outdir):
+        sys.exit("error: another pixelcut run is working in %s right now - wait until it has finished" % a.outdir)
     if a.grid and a.from_labels:
         sys.exit("use either --grid or --from-labels, not both")
     refuse_inputs([a.input] + ([a.from_labels] if a.from_labels else []),
@@ -724,7 +740,10 @@ def _cmd_split(a, held):
         if foreign_entries(staging):
             sys.exit("%s exists and does not look like pixelcut's own scratch folder - remove it first" % staging)
         shutil.rmtree(staging)
-    staging.mkdir()
+    try:
+        staging.mkdir()
+    except FileExistsError:
+        sys.exit("error: another pixelcut run is working in %s right now - wait until it has finished" % out)
     ink = np.array([20, 16, 14], np.uint8)
     info = []
     for k in range(len(angles)):
@@ -743,7 +762,10 @@ def _cmd_split(a, held):
     (staging / "parts.json").write_text(json.dumps({"size": [w, h], "centre": list(centre), "files": files, "parts": info,
                                                     **({"grid": list(grid)} if grid else {}), **({"from_labels": True} if labelled else {})}, indent=1))
     backup = out / ".pixelcut_old"                            # old files are moved aside, not deleted - an abort rolls back
-    backup.mkdir()                                            # (a leftover one was restored above, so this is always new)
+    try:
+        backup.mkdir()                                        # (a leftover one was restored above, so this is always new)
+    except FileExistsError:
+        sys.exit("error: another pixelcut run is working in %s right now - wait until it has finished" % out)
     write_journal(backup, [])                       # names this run is installing, written BEFORE each install (all old files are aside by then)
     moved, installed = [], []
     try:
@@ -786,6 +808,8 @@ def _cmd_split(a, held):
 
 # ----------------------------------------------------------------------------- key
 def cmd_key(a):
+    if folder_is_busy(a.outdir):
+        sys.exit("error: another pixelcut run is working in %s right now - wait until it has finished" % a.outdir)
     refuse_inputs([a.input], [Path(a.outdir) / n for n in ("base.png", "element.png", "preview.png")])
     rgb = load_rgb(a.input)
     h, w = rgb.shape[:2]
@@ -858,14 +882,8 @@ def cmd_join(a):
     for work in (".pixelcut_old", ".pixelcut_new", DONE):     # a split is running here or died in the middle: the set is not complete
         if (Path(a.parts) / work).exists():
             sys.exit("error: %s is being written (or a split was interrupted) - run split again, or wait until it has finished" % a.parts)
-    lock_path = Path(a.parts) / ".pixelcut_lock"
-    if lock_path.is_file():
-        try:
-            with open(lock_path, "rb") as probe:
-                if _lock(probe) == "busy":
-                    sys.exit("error: a pixelcut run is writing in %s right now - wait until it has finished" % a.parts)
-        except OSError:
-            pass
+    if folder_is_busy(a.parts):
+        sys.exit("error: a pixelcut run is writing in %s right now - try again when it has finished" % a.parts)
     manifest = Path(a.parts) / "parts.json"
     size = None
     if manifest.exists():                                     # the manifest says which parts belong together - all of them are needed
@@ -899,7 +917,16 @@ def cmd_join(a):
     refuse_inputs(files + [Path(a.parts) / "parts.json"], [a.output])
     if Path(a.output).suffix.lower() not in LOSSLESS + (".bmp",):
         sys.exit("error: join must write a lossless picture (.png, .tif or .bmp) - %s would change pixels, the rebuild is only exact lossless" % (Path(a.output).suffix or "this format"))
+    def stamp():                                              # what the files looked like: a split that swaps them while we read changes this
+        return [(f.name, f.stat().st_size, f.stat().st_mtime_ns, getattr(f.stat(), "st_ino", 0)) for f in files]
+    before = stamp()
     out = over_white(np.array(Image.open(f).convert("RGBA")) for f in files)
+    try:
+        after = stamp()
+    except OSError:
+        after = None
+    if after != before or any((Path(a.parts) / w).exists() for w in (".pixelcut_old", ".pixelcut_new", DONE)):
+        sys.exit("error: the parts in %s changed while they were being read (a split ran at the same time) - nothing was written, try again" % a.parts)
     save_atomic(Image.fromarray(np.clip(out, 0, 255).round().astype(np.uint8)), a.output)
     print("joined %d parts -> %s" % (len(files), a.output))
 
@@ -1219,7 +1246,7 @@ def _warn_about(err):
     import warnings
     for ln in err.getvalue().splitlines():
         if ln.startswith("note:") and any(w in ln for w in ("left untouched", "still holds", "cannot tell", "cannot create the lock", "kept")):
-            warnings.warn(ln[5:].strip(), UserWarning, stacklevel=3)
+            warnings.warn(ln[5:].strip(), UserWarning, stacklevel=4)
 
 
 def _run(cmd, positional, opts):
@@ -1228,7 +1255,7 @@ def _run(cmd, positional, opts):
     out, err = io.StringIO(), io.StringIO()
 
     def hint(message):                                        # "your previous files are kept in ..." must not be swallowed
-        extra = [ln for ln in err.getvalue().splitlines() if ln.startswith("error:") or "kept in" in ln]
+        extra = [ln for ln in err.getvalue().splitlines() if ln.startswith("error:") or "kept in" in ln or "still holds" in ln]
         return message + ("\n" + "\n".join(extra) if extra else "")
     try:
         with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):   # the API prints nothing, notes included

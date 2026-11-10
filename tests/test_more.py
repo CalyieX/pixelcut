@@ -1393,3 +1393,33 @@ def test_aside_with_only_a_half_written_note_is_removed(tmp_path):
     (d / "publish.json.tmp").write_text("{")
     pixelcut.recover_publish(tmp_path)
     assert not d.exists()
+
+
+def test_join_never_returns_a_mixed_picture_when_a_split_swaps_the_parts(tmp_path, monkeypatch):
+    import pixelcut
+    Image.fromarray((np.random.RandomState(11).rand(30, 40, 3) * 255).astype("uint8")).save(tmp_path / "o.png")
+    out = tmp_path / "p"
+    pixelcut.split(tmp_path / "o.png", out, grid="2x2", opaque=True)
+    real = pixelcut.over_white
+
+    def swapping(it):
+        for k, im in enumerate(it):
+            if k == 1:                                              # "another run" replaces a part while join is reading
+                Image.new("RGBA", (40, 30), (1, 2, 3, 255)).save(out / "part_3.png")
+            yield im
+    monkeypatch.setattr(pixelcut, "over_white", lambda it: real(swapping(it)))
+    with pytest.raises(pixelcut.PixelcutError, match="changed while"):
+        pixelcut.join(out, tmp_path / "j.png")
+    assert not (tmp_path / "j.png").exists()
+
+
+def test_a_file_system_without_locks_is_announced(tmp_path, monkeypatch, capsys):
+    import pixelcut
+    monkeypatch.setattr(pixelcut, "_lock", lambda f: "unavailable")
+    held = []
+    try:
+        assert pixelcut.lock_folder(tmp_path, held) is False
+    finally:
+        for f in held:
+            f.close()
+    assert "cannot lock folders" in capsys.readouterr().err
