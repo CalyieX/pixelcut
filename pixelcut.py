@@ -32,7 +32,7 @@ import numpy as np
 from PIL import Image, ImageOps
 
 
-__version__ = "1.6.5"
+__version__ = "1.6.6"
 PART_NAME = re.compile(r"part_(0|[1-9]\d*)\.png")                  # exactly the names split writes: no leading zeros
 LOSSLESS = (".png", ".tif", ".tiff")
 
@@ -80,10 +80,26 @@ def scratch_beside(path):
     return d, d / path.name
 
 
+def _lock(f):
+    """Try to take an exclusive, non-blocking lock on an open file. False if somebody else holds it (or locking is unavailable)."""
+    try:
+        f.seek(0)
+        if os.name == "nt":
+            import msvcrt
+            msvcrt.locking(f.fileno(), msvcrt.LK_NBLCK, 1)
+        else:
+            import fcntl
+            fcntl.flock(f.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+        return True
+    except (OSError, ImportError):
+        return False
+
+
 def publish(pairs):
     """Replace several finished files at once: [(finished_file, destination), ...]. Existing destinations are moved aside first and
     put back if anything goes wrong, so either all new files are in place or all old ones are. The aside folder is the truth about
-    what has to be restored (no bookkeeping that an abort could skip) and it is deleted only when it is empty again."""
+    what has to be restored (no bookkeeping that an abort could skip) and it is deleted only when it is empty again.
+    The running process holds a lock on <aside>/lock: a later run can tell a dead run (recover it) from a live one (hands off)."""
     import tempfile
     folder = Path(pairs[0][1]).resolve().parent
     recover_publish(folder)                                   # a hard abort of an earlier run is finished first
@@ -93,6 +109,10 @@ def publish(pairs):
         if Path(dest).exists() and not os.access(dest, os.W_OK):
             sys.exit("error: %s is read-only - nothing was changed" % dest)
     aside = Path(tempfile.mkdtemp(prefix=".pixelcut_", dir=folder))
+    lockf = open(aside / "lock", "w+b")
+    lockf.write(b"1")
+    lockf.flush()
+    _lock(lockf)                                              # held until this run is over, whatever happens
     (aside / "publish.json").write_text(json.dumps({"dests": [str(Path(d).resolve()) for _, d in pairs]}), encoding="utf-8")   # lets a later run undo an abort
     installed = []
     try:
@@ -106,6 +126,10 @@ def publish(pairs):
         (aside / "committed").write_text("1")                 # the new set is complete: a later run only removes the backup
     except BaseException:
         stuck = []
+        if not (aside / "publish.json").is_file():            # the backup folder is not ours any more: never delete files on a guess
+            lockf.close()
+            print("error: the backup folder %s vanished during the run - the files were left as they are" % aside, file=sys.stderr)
+            raise
         for dest in installed:
             try:
                 Path(dest).unlink(missing_ok=True)
@@ -116,35 +140,54 @@ def publish(pairs):
                 os.replace(f, pairs[int(f.name)][1])
             except OSError as e:
                 stuck.append("%s (%s)" % (pairs[int(f.name)][1], e))
+        lockf.close()
         if stuck:                                             # never destroy the only copy: say where it is
             print("error: could not restore everything - your previous files are kept in %s\n  problem with: %s" % (aside, "; ".join(stuck)), file=sys.stderr)
         else:
             shutil.rmtree(aside, ignore_errors=True)
         raise
+    lockf.close()
     shutil.rmtree(aside, ignore_errors=True)
 
 
 def recover_publish(folder):
     """Finish what a hard abort (power cut, kill) left behind in publish(): a backup folder with publish.json beside the files.
+    Only a folder whose lock nobody holds is touched (a live run keeps its lock), and only files directly inside `folder`.
     'committed' = the new set is complete, drop the backup; otherwise go back to the old set (delete the new files if the
     install phase had started, then put the backups back)."""
-    for d in sorted(Path(folder).glob(".pixelcut_*")):
+    folder = Path(folder).resolve()
+    for d in sorted(folder.glob(".pixelcut_*")):
         meta = d / "publish.json"
-        if link_like(d) or not d.is_dir() or not meta.is_file():
+        if link_like(d) or not d.is_dir() or not meta.is_file() or not (d / "lock").is_file():
             continue
         try:
-            dests = json.loads(meta.read_text(encoding="utf-8"))["dests"]
-            assert isinstance(dests, list) and all(isinstance(x, str) for x in dests)
-        except (OSError, ValueError, KeyError, AssertionError):
-            continue                                          # not readable: leave it alone rather than guess
-        if not (d / "committed").exists():
-            if (d / "installing").exists():
-                for x in dests:
-                    Path(x).unlink(missing_ok=True)
-            for f in [f for f in d.iterdir() if f.name.isdigit() and int(f.name) < len(dests)]:
-                os.replace(f, dests[int(f.name)])
-            print("note: finished an interrupted earlier run in %s - the previous files are back" % folder, file=sys.stderr)
-        shutil.rmtree(d, ignore_errors=True)
+            lf = open(d / "lock", "r+b")
+        except OSError:
+            continue
+        try:
+            if not _lock(lf):                                 # somebody is running right now: hands off
+                continue
+            try:
+                dests = json.loads(meta.read_text(encoding="utf-8"))["dests"]
+                assert isinstance(dests, list) and all(isinstance(x, str) for x in dests)
+                assert all(Path(x).resolve().parent == folder for x in dests)      # a renamed folder must not make us write elsewhere
+            except (OSError, ValueError, KeyError, AssertionError):
+                print("note: %s looks like a backup of an interrupted run but does not belong here - left untouched" % d, file=sys.stderr)
+                continue
+            acted = False
+            if not (d / "committed").exists():
+                if (d / "installing").exists():
+                    for x in dests:
+                        Path(x).unlink(missing_ok=True)
+                for f in [f for f in d.iterdir() if f.name.isdigit() and int(f.name) < len(dests)]:
+                    os.replace(f, dests[int(f.name)])
+                    acted = True
+            if acted:
+                print("note: finished an interrupted earlier run in %s - the previous files are back" % folder, file=sys.stderr)
+        finally:
+            lf.close()
+        if (d / "committed").exists() or not any(f.name.isdigit() for f in d.iterdir()):   # an unrestored backup is never thrown away
+            shutil.rmtree(d, ignore_errors=True)
 
 
 def refuse_inputs(inputs, outputs):
@@ -207,6 +250,8 @@ def oserror_message(e):
     if isinstance(e, (FileExistsError, NotADirectoryError)):
         return "error: %s is a file, not a folder (or the other way round) - choose another path" % name
     if isinstance(e, PermissionError):
+        if Path(str(name)).is_dir():
+            return "error: %s is a folder, not a file - choose another path" % name
         return "error: cannot write %s (read-only, or in use by another program)" % name
     return None
 
@@ -214,6 +259,14 @@ def oserror_message(e):
 def save_atomic(img, path):
     """Write beside the target, replace only when complete: an abort never leaves half a picture in place of a good one."""
     need_folder_of(path)
+    ext = Path(path).suffix.lower()
+    if ext not in Image.registered_extensions():
+        sys.exit("error: cannot write %s - use .png, .tif, .jpg, .webp or .bmp" % (ext or "a file without an ending"))
+    if ext in (".jpg", ".jpeg") and img.mode in ("RGBA", "LA", "PA"):         # JPEG has no transparency: flatten over white, say so
+        print("note: %s cannot hold transparency - flattened over white" % path, file=sys.stderr)
+        flat = Image.new("RGB", img.size, "white")
+        flat.paste(img.convert("RGBA"), mask=img.convert("RGBA").getchannel("A"))
+        img = flat
     d, tmp = scratch_beside(path)
     try:
         img.save(tmp)
@@ -458,6 +511,7 @@ def grid_cells(shape, cols, rows):
 def read_label_map(path, w, h):
     """Label picture -> (part id 0..n-1 per pixel, n). Grey values are the part numbers (8 or 16 bit, indexed also fine); the
     numbers need not be consecutive, parts are ordered by value. Every pixel belongs to exactly one part."""
+    need_picture(path)
     try:
         im = Image.open(path)
         im.load()
@@ -739,6 +793,8 @@ def cmd_key(a):
 # ----------------------------------------------------------------------------- join / compare
 def cmd_join(a):
     """Put parts back together (over white or a colour) - the way to 'rebuild' a picture from its exact pieces."""
+    if not Path(a.parts).is_dir():
+        sys.exit("error: %s is not a folder of parts (does not exist, or is a file)" % a.parts)
     manifest = Path(a.parts) / "parts.json"
     size = None
     if manifest.exists():                                     # the manifest says which parts belong together - all of them are needed

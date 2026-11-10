@@ -1191,6 +1191,7 @@ def test_publish_recovers_after_a_hard_abort(tmp_path):
         aside = d / ".pixelcut_crash"
         aside.mkdir()
         (aside / "publish.json").write_text(_json.dumps({"dests": [str(x.resolve()) for x in dests]}))
+        (aside / "lock").write_bytes(b"1")
         if state == "moving":                                  # a.png was moved aside, b.png not yet
             (aside / "0").write_bytes(b"OLD-A")
         else:                                                   # every old file is aside, new files partly installed
@@ -1217,3 +1218,95 @@ def test_jpeg2000_label_map_is_refused(tmp_path):
         pytest.skip("this Pillow cannot write JPEG 2000")
     r = cli("split", tmp_path / "o.png", tmp_path / "x", "--from-labels", tmp_path / "m.jp2", check=False)
     assert r.returncode != 0 and "lossy" in r.stderr
+
+
+def _crashed_aside(folder, dests_names, installing=True, committed=False, dests_override=None):
+    import json as _json
+    aside = folder / ".pixelcut_dead"
+    aside.mkdir()
+    (aside / "lock").write_bytes(b"1")
+    dests = dests_override or [str((folder / n).resolve()) for n in dests_names]
+    (aside / "publish.json").write_text(_json.dumps({"dests": dests}))
+    for i, n in enumerate(dests_names):
+        (aside / str(i)).write_bytes(b"OLD-" + n.encode())
+        (folder / n).write_bytes(b"NEW-" + n.encode())
+    if installing:
+        (aside / "installing").write_text("1")
+    if committed:
+        (aside / "committed").write_text("1")
+    return aside
+
+
+def test_recovery_leaves_a_live_run_alone(tmp_path):
+    import pixelcut
+    aside = _crashed_aside(tmp_path, ["a.png", "b.png"])
+    held = open(aside / "lock", "r+b")                              # another running pixelcut holds this lock
+    assert pixelcut._lock(held)
+    try:
+        pixelcut.recover_publish(tmp_path)
+        assert aside.exists() and (tmp_path / "a.png").read_bytes() == b"NEW-a.png"
+    finally:
+        held.close()
+    pixelcut.recover_publish(tmp_path)                              # lock gone = run is dead: now it is recovered
+    assert not aside.exists() and (tmp_path / "a.png").read_bytes() == b"OLD-a.png"
+
+
+def test_two_overlapping_publishes_never_empty_the_folder(tmp_path):
+    import pixelcut
+    for n in ("a.png", "b.png"):
+        (tmp_path / n).write_bytes(b"OLD")
+    pairs = []
+    for n in ("a.png", "b.png"):
+        (tmp_path / (n + ".new")).write_bytes(b"NEW1")
+        pairs.append((tmp_path / (n + ".new"), tmp_path / n))
+    real = os.replace
+    state = {"inner": False}
+
+    def during(a, b):
+        r = real(a, b)
+        if not state["inner"] and str(b).endswith("a.png"):          # a second run starts while the first is installing
+            state["inner"] = True
+            for n in ("a.png", "b.png"):
+                (tmp_path / (n + ".new2")).write_bytes(b"NEW2")
+            pixelcut.publish([(tmp_path / (n + ".new2"), tmp_path / n) for n in ("a.png", "b.png")])
+        return r
+    pixelcut.os.replace = during
+    try:
+        try:
+            pixelcut.publish(pairs)
+        except BaseException:
+            pass
+    finally:
+        pixelcut.os.replace = real
+    assert (tmp_path / "a.png").exists() and (tmp_path / "b.png").exists()
+
+
+def test_recovery_only_touches_its_own_folder_and_keeps_unrestored_backups(tmp_path):
+    import pixelcut
+    other = tmp_path / "other"
+    other.mkdir()
+    (other / "x.png").write_bytes(b"MINE")
+    d = tmp_path / "work"
+    d.mkdir()
+    aside = _crashed_aside(d, ["a.png"], dests_override=[str((other / "x.png").resolve())])
+    pixelcut.recover_publish(d)
+    assert (other / "x.png").read_bytes() == b"MINE" and aside.exists()           # foreign destination: nothing done
+    d2 = tmp_path / "work2"
+    d2.mkdir()
+    aside2 = _crashed_aside(d2, ["a.png", "b.png", "c.png"])
+    import json as _json
+    (aside2 / "publish.json").write_text(_json.dumps({"dests": [str((d2 / "a.png").resolve())]}))   # shortened list
+    pixelcut.recover_publish(d2)
+    assert (aside2 / "1").exists() and (aside2 / "2").exists()                     # backups that were not restored stay
+
+
+def test_jpeg_output_flattens_transparency_and_unknown_endings_are_plain(tmp_path):
+    Image.new("RGBA", (10, 10), (255, 0, 0, 100)).save(tmp_path / "t.png")
+    r = cli("upscale", tmp_path / "t.png", tmp_path / "u.jpg", "--no-ai", "--scale", "2", check=False)
+    assert r.returncode == 0 and "flattened" in r.stderr
+    r = cli("upscale", tmp_path / "t.png", tmp_path / "u.svg", "--no-ai", check=False)
+    assert r.returncode != 0 and "cannot write .svg" in r.stderr and "unknown file extension" not in r.stderr
+    r = cli("join", tmp_path / "nothere", tmp_path / "j.png", check=False)
+    assert r.returncode != 0 and "not a folder of parts" in r.stderr
+    r = cli("split", tmp_path / "t.png", tmp_path / "x", "--from-labels", tmp_path / "nothere.png", check=False)
+    assert r.returncode != 0 and "does not exist" in r.stderr and "Errno" not in r.stderr
