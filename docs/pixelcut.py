@@ -32,7 +32,7 @@ import numpy as np
 from PIL import Image, ImageOps
 
 
-__version__ = "1.6.15"
+__version__ = "1.6.16"
 PART_NAME = re.compile(r"part_(0|[1-9]\d*)\.png")                  # exactly the names split writes: no leading zeros
 LOSSLESS = (".png", ".tif", ".tiff")
 
@@ -972,6 +972,8 @@ def _cmd_join(a, held):
     data = [f.read_bytes() for f in files]                    # every part is read once, into memory
     before = [hashlib.sha256(d).hexdigest() for d in data] + [hashlib.sha256(manifest_bytes).hexdigest() if manifest_bytes is not None else None]
     def decode_part(d):
+        if d[:4] == bytes([0x89, 0x50, 0x4E, 0x47]) and len(d) > 24 and d[24] == 16:
+            sys.exit("error: join works on 8-bit parts (as split writes them) - this part is 16 bit per channel and would be cut off")
         im = Image.open(io.BytesIO(d))
         if im.mode in ("I;16", "I;16L", "I;16B", "I", "F"):
             sys.exit("error: join works on 8-bit parts (as split writes them) - %s-bit grey parts would be cut off" % "16")
@@ -1139,6 +1141,22 @@ def ensure_esrgan():
     return str(exe) if exe else None
 
 
+def engine_result(path):
+    """Open the picture the engine made. It is 16 times the input - far over Pillow's bomb limit for a normal 12 MP photo - and it is
+    our own scratch file, so the limit is lifted here only; check_upscaled_size has already capped the real result."""
+    class Opened:
+        def __enter__(self):
+            self.old = Image.MAX_IMAGE_PIXELS
+            Image.MAX_IMAGE_PIXELS = None
+            self.im = Image.open(path)
+            self.im.load()
+            return self.im
+        def __exit__(self, *exc):
+            Image.MAX_IMAGE_PIXELS = self.old
+            self.im.close()
+    return Opened()
+
+
 def check_upscaled_size(im, scale):
     if im.width * im.height * scale * scale > 600_000_000:
         sys.exit("error: the result would be %d x %d = %d MP (limit 600 MP) - use a smaller --scale or a smaller picture"
@@ -1186,13 +1204,13 @@ def cmd_upscale(a):
         if not tmp.is_file() or tmp.stat().st_size == 0:
             raise OSError("the engine produced no picture")
         if a.scale != 4:                                      # the wanted factor: resize the 4x result
-            with Image.open(tmp) as made:
+            with engine_result(tmp) as made:
                 made = made.resize((pic.width * a.scale, pic.height * a.scale), Image.LANCZOS)
             made.save(tmp)
         if engine_ok:
             os.replace(tmp, target)
         else:
-            with Image.open(tmp) as made:
+            with engine_result(tmp) as made:
                 save_atomic(made.copy(), target)
     except subprocess.TimeoutExpired:
         return lanczos_upscale(a, "the engine did not finish in 30 minutes")

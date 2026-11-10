@@ -1632,3 +1632,25 @@ def test_upscale_refuses_an_absurd_output_size_and_does_not_announce_a_fallback(
     with pytest.raises(pixelcut.PixelcutError, match="limit 600 MP"):
         pixelcut.upscale(tmp_path / "big.png", tmp_path / "o.png", scale=5, no_ai=True)
     assert "Lanczos" not in capsys.readouterr().out
+
+
+def test_upscale_survives_an_engine_result_over_pillows_bomb_limit(tmp_path, monkeypatch):
+    import pixelcut
+    Image.new("RGB", (30, 20), (9, 9, 9)).save(tmp_path / "a.png")
+    exe = _fake_engine(tmp_path, monkeypatch, {})
+    monkeypatch.setattr(Image, "MAX_IMAGE_PIXELS", 500)             # the 120x80 engine result is over 2x this
+    pixelcut.upscale(tmp_path / "a.png", tmp_path / "u.png", scale=2, bin=exe)
+    pixelcut.upscale(tmp_path / "a.png", tmp_path / "u.tif", scale=4, bin=exe)
+    assert Image.MAX_IMAGE_PIXELS == 500                            # restored
+    monkeypatch.setattr(Image, "MAX_IMAGE_PIXELS", None)
+    assert Image.open(tmp_path / "u.png").size == (60, 40)
+
+
+def test_join_refuses_16_bit_png_parts(tmp_path):
+    import pixelcut, cv2
+    out = tmp_path / "p"
+    out.mkdir()
+    for k in range(2):
+        cv2.imwrite(str(out / ("part_%d.png" % k)), np.full((8, 8, 3), 30000, np.uint16))
+    with pytest.raises(pixelcut.PixelcutError, match="16 bit"):
+        pixelcut.join(out, tmp_path / "j.png")
