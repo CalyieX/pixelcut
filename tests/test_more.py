@@ -1878,3 +1878,167 @@ def test_batch_never_overwrites_an_input_and_refuses_abbreviated_render(tmp_path
     (src / "bad.png").unlink()
     with pytest.raises(pixelcut.PixelcutError, match="failed"):
         pixelcut.batch("alpha", src, tmp_path / "o2")
+
+
+def test_batch_recognises_the_same_folder_under_another_spelling(tmp_path):
+    import os
+    import pixelcut
+    if os.name != "nt":
+        pytest.skip("long-path / UNC spellings exist on Windows only")
+    src = tmp_path / "in"
+    src.mkdir()
+    Image.new("RGB", (10, 10), "red").save(src / "a.png")
+    for other in ("\\?\\" + str(src), str(src).replace("\\", "/"), "\\?\\" + str(src).replace("/", "\\")):
+        with pytest.raises(pixelcut.PixelcutError):
+            pixelcut.batch("upscale", src, other, overwrite=True, scale=2, ai=False)
+        with pytest.raises(pixelcut.PixelcutError):
+            pixelcut.batch("upscale", other, src, overwrite=True, scale=2, ai=False)
+    assert Image.open(src / "a.png").size == (10, 10)
+
+
+def test_batch_notes_every_multiframe_format_after_its_own_line(tmp_path):
+    import subprocess
+    import sys
+    src = tmp_path / "in"
+    src.mkdir()
+    fr = [Image.new("RGB", (8, 8), c) for c in ("red", "green", "blue")]
+    fr[0].save(src / "m.tif", save_all=True, append_images=fr[1:])
+    fr[0].save(src / "g.gif", save_all=True, append_images=fr[1:])
+    out = subprocess.run([sys.executable, str(Path(__file__).resolve().parent.parent / "pixelcut.py"), "batch", "alpha", str(src), str(tmp_path / "o")],
+                         capture_output=True, text=True, check=True).stdout.splitlines()
+    for name in ("m.tif", "g.gif"):
+        i = next(n for n, ln in enumerate(out) if ln.endswith("%s: ok" % name) or (name in ln and ": ok" in ln))
+        assert "3 frames" in out[i + 1]
+
+
+def _swap_picture(tmp_path):
+    """Smooth skin-like gradient with a red square at (40..51, 30..41)."""
+    yy, xx = np.mgrid[0:80, 0:100]
+    base = np.dstack([235 - xx * .3, 215 - yy * .2, 205 + xx * 0 + yy * 0]).astype(np.uint8)
+    base[30:42, 40:52] = (220, 30, 50)
+    Image.fromarray(base).save(tmp_path / "s.png")
+    return base
+
+
+def test_swap_removes_an_element_and_leaves_everything_far_away_untouched(tmp_path):
+    import pixelcut
+    base = _swap_picture(tmp_path)
+    pixelcut.swap(tmp_path / "s.png", tmp_path / "o.png", at=(45, 35))
+    out = np.array(Image.open(tmp_path / "o.png").convert("RGB")).astype(int)
+    assert np.abs(out[28:44, 38:54] - base[28:44, 38:54].astype(int)).max() > 50          # the square changed...
+    assert out[30:42, 40:52, 0].min() > 150 and out[30:42, 40:52, 1].min() > 150           # ...and is no longer red
+    far = np.ones((80, 100), bool)
+    far[20:52, 30:62] = False
+    assert (out[far] == base[far].astype(int)).all()                                       # nothing else was touched
+
+
+def test_swap_sets_a_shape_with_a_shadow_that_only_darkens_the_surface_beside_it(tmp_path):
+    import pixelcut
+    _swap_picture(tmp_path)
+    pixelcut.swap(tmp_path / "s.png", tmp_path / "plain.png", at=(45, 35), shape="diamond", shadow=0, colour="#0000ff")
+    pixelcut.swap(tmp_path / "s.png", tmp_path / "shaded.png", at=(45, 35), shape="diamond", shadow=.8, colour="#0000ff")
+    p = np.array(Image.open(tmp_path / "plain.png").convert("RGB")).astype(int)
+    s = np.array(Image.open(tmp_path / "shaded.png").convert("RGB")).astype(int)
+    assert tuple(p[36, 46]) == (0, 0, 255) and tuple(s[36, 46]) == (0, 0, 255)             # the shape itself is the same
+    assert (s <= p).all() and (s < p).any()                                                 # the shadow only darkens
+    low_right = s[42:48, 50:56].sum() - p[42:48, 50:56].sum()
+    up_left = s[24:30, 36:42].sum() - p[24:30, 36:42].sum()
+    assert low_right < up_left <= 0                                                         # light from the top left: more shade below right
+
+
+def test_swap_cut_keeps_the_exact_pixels_and_errors_are_clear(tmp_path):
+    import pixelcut
+    base = _swap_picture(tmp_path)
+    pixelcut.swap(tmp_path / "s.png", tmp_path / "o.png", at=(45, 35), cut=tmp_path / "e.png", grow=0)
+    el = np.array(Image.open(tmp_path / "e.png").convert("RGBA"))
+    assert el.shape[:2] == (12, 12) and (el[..., 3] == 255).all() and (el[..., :3] == base[30:42, 40:52]).all()
+    with pytest.raises(pixelcut.PixelcutError, match="outside the picture"):
+        pixelcut.swap(tmp_path / "s.png", tmp_path / "x.png", at=(500, 5))
+    with pytest.raises(pixelcut.PixelcutError, match="quarter of the picture"):
+        pixelcut.swap(tmp_path / "s.png", tmp_path / "x.png", at=(5, 5), tolerance=255)
+    with pytest.raises(pixelcut.PixelcutError, match="--shape"):
+        pixelcut.swap(tmp_path / "s.png", tmp_path / "x.png", at=(45, 35), shape="blob")
+    with pytest.raises(pixelcut.PixelcutError, match="also an input"):
+        pixelcut.swap(tmp_path / "s.png", tmp_path / "s.png", at=(45, 35))
+    assert "swap" in pixelcut.__all__
+
+
+def test_regions_numbers_the_distinct_elements_and_swap_can_use_the_point(tmp_path):
+    import json
+    import pixelcut
+    base = _swap_picture(tmp_path)
+    regs = pixelcut.regions(tmp_path / "s.png", tmp_path / "r", min_area=20)
+    hit = [r for r in regs if 40 <= int(r["at"].split(",")[0]) <= 51 and 30 <= int(r["at"].split(",")[1]) <= 41]
+    assert hit and hit[0]["colour"].startswith("#d") and hit[0]["area"] >= 100                       # the red square is one numbered element
+    assert Image.open(tmp_path / "r" / "regions.png").size[0] >= 100
+    assert json.loads((tmp_path / "r" / "regions.json").read_text())["size"] == [100, 80]
+    pixelcut.swap(tmp_path / "s.png", tmp_path / "o.png", at=hit[0]["at"])                          # the id's point feeds swap directly
+    out = np.array(Image.open(tmp_path / "o.png").convert("RGB")).astype(int)
+    assert out[30:42, 40:52, 1].min() > 150
+
+
+def test_tools_prints_every_command_as_a_tool_definition(tmp_path):
+    import json
+    out = subprocess.run([sys.executable, str(Path(__file__).resolve().parent.parent / "pixelcut.py"), "tools"], capture_output=True, text=True, check=True).stdout
+    names = {t["name"] for t in json.loads(out)["tools"]}
+    assert {"pixelcut_swap", "pixelcut_regions", "pixelcut_split", "pixelcut_join", "pixelcut_batch", "pixelcut_alpha"} <= names
+    swap = next(t for t in json.loads(out)["tools"] if t["name"] == "pixelcut_swap")
+    assert "at" in swap["input_schema"]["required"] and swap["input_schema"]["properties"]["shadow"]["type"] == "number"
+
+
+def test_swap_reports_how_much_of_the_picture_stayed_identical(tmp_path):
+    out = subprocess.run([sys.executable, str(Path(__file__).resolve().parent.parent / "pixelcut.py"), "swap", str(_swap_pic_path(tmp_path)), str(tmp_path / "o.png"), "--at", "45,35", "--shape", "diamond"],
+                         capture_output=True, text=True, check=True).stdout
+    assert "check:" in out and "identical to the original" in out and "shading kept" in out
+
+
+def _swap_pic_path(tmp_path):
+    _swap_picture(tmp_path)
+    return tmp_path / "s.png"
+
+
+def _dome_picture(tmp_path):
+    """A surface that turns away to the right (brightness falls off strongly) with a red square on it."""
+    yy, xx = np.mgrid[0:80, 0:100]
+    lum = 1.0 - ((xx - 20) / 90.0) ** 2 * .9
+    base = np.dstack([235 * lum, 215 * lum, 205 * lum]).astype(np.uint8)
+    base[30:42, 40:52] = (220, 30, 50)
+    Image.fromarray(base).save(tmp_path / "d.png")
+    return base
+
+
+def test_swap_detects_a_curved_surface_by_itself_and_bends_the_shape(tmp_path):
+    import pixelcut
+    _dome_picture(tmp_path)
+    said = subprocess.run([sys.executable, str(ROOT / "pixelcut.py"), "swap", str(tmp_path / "d.png"), str(tmp_path / "bent.png"), "--at", "45,35", "--shape", "diamond"], capture_output=True, text=True).stdout
+    assert "surface: curved" in said
+    pixelcut.swap(tmp_path / "d.png", tmp_path / "flat.png", at=(45, 35), shape="diamond", flat_surface=True)
+    bent = np.array(Image.open(tmp_path / "bent.png").convert("RGB")).astype(int)
+    flat = np.array(Image.open(tmp_path / "flat.png").convert("RGB")).astype(int)
+    red = lambda im: ((im[..., 0] - im[..., 1]) > 60).sum()
+    assert red(bent) < red(flat)                                  # foreshortened: less area than the flat version
+
+
+def test_swap_leaves_a_flat_picture_flat_without_being_told(tmp_path):
+    import pixelcut
+    _swap_picture(tmp_path)
+    said = subprocess.run([sys.executable, str(ROOT / "pixelcut.py"), "swap", str(tmp_path / "s.png"), str(tmp_path / "o.png"), "--at", "45,35", "--shape", "diamond"], capture_output=True, text=True).stdout
+    assert "surface: flat" in said
+
+
+def test_swap_keeps_what_lies_in_front_of_the_element_in_front(tmp_path):
+    import pixelcut
+    base = _swap_picture(tmp_path)
+    base[24:48, 45:47] = (40, 40, 40)                             # a dark strand lying across the red square
+    Image.fromarray(base).save(tmp_path / "h.png")
+    for shape in ("none", "diamond"):
+        r = cli("swap", tmp_path / "h.png", tmp_path / ("o_%s.png" % shape), "--at", "42,35", "--shape", shape)
+        assert "depth:" in r.stdout and "stay in front" in r.stdout
+        out = np.array(Image.open(tmp_path / ("o_%s.png" % shape)).convert("RGB")).astype(int)
+        assert np.abs(out[31:41, 45:47] - base[31:41, 45:47].astype(int)).max() <= 8   # the strand stays (a faint cast shadow on the new shape may darken it slightly)
+
+
+def test_swap_reports_no_depth_layer_when_nothing_is_in_front(tmp_path):
+    _swap_picture(tmp_path)
+    r = cli("swap", tmp_path / "s.png", tmp_path / "o.png", "--at", "45,35")
+    assert "analysis:" in r.stdout and "nothing lies in front" in r.stdout

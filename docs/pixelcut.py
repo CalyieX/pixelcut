@@ -20,6 +20,7 @@ Run `python pixelcut.py COMMAND -h` for the options.
 """
 import argparse
 import json
+import math
 import os
 import re
 import shutil
@@ -32,7 +33,7 @@ import numpy as np
 from PIL import Image, ImageOps
 
 
-__version__ = "1.7.2"
+__version__ = "1.9.0"
 PART_NAME = re.compile(r"part_(0|[1-9]\d*)\.png")                  # exactly the names split writes: no leading zeros
 LOSSLESS = (".png", ".tif", ".tiff")
 
@@ -907,6 +908,506 @@ def cmd_key(a):
 
 
 
+# ----------------------------------------------------------------------------- swap
+SWAP_SHAPES = ("none", "diamond", "square", "circle", "heart", "star")
+
+
+def swap_shape_alpha(shape, w, h, size):
+    """Anti-aliased alpha (h x w, 0..1) of a shape centred in the box, `size` times the box (supersampled 8x)."""
+    s = 8
+    mask = np.zeros((h * s, w * s), np.uint8)
+    cx, cy = w * s / 2, h * s / 2
+    rx, ry = w * s / 2 * size, h * s / 2 * size
+    if shape == "circle":
+        cv2.ellipse(mask, (int(cx), int(cy)), (max(1, int(rx)), max(1, int(ry))), 0, 0, 360, 255, -1, cv2.LINE_AA)
+        return cv2.resize(mask, (w, h), interpolation=cv2.INTER_AREA).astype(np.float32) / 255
+    if shape == "diamond":
+        pts = [(cx, cy - ry), (cx + rx, cy), (cx, cy + ry), (cx - rx, cy)]
+    elif shape == "square":
+        pts = [(cx - rx, cy - ry), (cx + rx, cy - ry), (cx + rx, cy + ry), (cx - rx, cy + ry)]
+    elif shape == "star":
+        pts = [(cx + (rx if k % 2 == 0 else rx * .42) * math.sin(k * math.pi / 5), cy - (ry if k % 2 == 0 else ry * .42) * math.cos(k * math.pi / 5)) for k in range(10)]
+    else:                                                      # heart
+        t = np.linspace(0, 2 * math.pi, 240)
+        hx, hy = 16 * np.sin(t) ** 3, 13 * np.cos(t) - 5 * np.cos(2 * t) - 2 * np.cos(3 * t) - np.cos(4 * t)
+        pts = list(zip(cx + hx / 17 * rx, cy - hy / 17 * ry))
+    cv2.fillPoly(mask, [np.array(pts, np.int32)], 255, cv2.LINE_AA)
+    return cv2.resize(mask, (w, h), interpolation=cv2.INTER_AREA).astype(np.float32) / 255
+
+
+def swap_heal(rgb, hole):
+    """Close `hole` (bool mask) from its surroundings. Structure-aware (Telea): a hair line or outline next to the hole continues
+    into it instead of being smeared, smooth skin stays smooth. The radius follows the size of the hole."""
+    hole_u = hole.astype(np.uint8)
+    radius = max(2, int(round(hole.sum() ** .5 * .18)))
+    bgr = cv2.cvtColor(np.ascontiguousarray(rgb), cv2.COLOR_RGB2BGR)
+    fill = cv2.cvtColor(cv2.inpaint(bgr, hole_u, radius, cv2.INPAINT_TELEA), cv2.COLOR_BGR2RGB).astype(np.float32)
+    soft = cv2.GaussianBlur(cv2.dilate(hole_u, np.ones((3, 3), np.uint8)).astype(np.float32), (0, 0), 0.9)[:, :, None]
+    return rgb.astype(np.float32) * (1 - soft) + fill * soft
+
+
+def swap_pick_region(rgb, points, tolerance):
+    """Connected colour area(s) at the picked point(s). tolerance None = automatic: grow it step by step and stop before the area
+    jumps (a jump means the colour has leaked into the surroundings)."""
+    h, w = rgb.shape[:2]
+
+    def flood(t):
+        region = np.zeros((h, w), bool)
+        for px, py in points:
+            ff = np.zeros((h + 2, w + 2), np.uint8)
+            cv2.floodFill(np.ascontiguousarray(rgb).copy(), ff, (px, py), (0, 0, 0), (t,) * 3, (t,) * 3, 4 | cv2.FLOODFILL_MASK_ONLY | cv2.FLOODFILL_FIXED_RANGE | (255 << 8))
+            region |= ff[1:-1, 1:-1] > 0
+        return region
+    if tolerance is not None:
+        return flood(int(round(tolerance))), int(round(tolerance))
+    sizes = []
+    for t in (20, 30, 42, 56, 72, 92):
+        r = flood(t)
+        sizes.append((t, r, int(r.sum())))
+    sizes = [x for x in sizes if x[2] >= 4] or [(60,) + (flood(60), int(flood(60).sum()))]
+    for (t0, r0, n0), (t1, r1, n1) in zip(sizes, sizes[1:]):
+        if n1 <= 1.15 * n0 and n0 <= .08 * h * w:              # the area has stopped growing: this is the element, not its surroundings
+            return r0, t0
+    ok = [x for x in sizes if x[2] <= .08 * h * w] or sizes[:1]
+    return ok[-1][1], ok[-1][0]
+
+
+def swap_add_tinted(rgb, region):
+    """An element that is partly covered or in shade has darker parts of the SAME hue (a red heart under a strand of hair turns dark
+    red). Take those connected parts along, so no tinted rest is left behind."""
+    h, w = region.shape
+    hsv = cv2.cvtColor(np.ascontiguousarray(rgb), cv2.COLOR_RGB2HSV).astype(np.float32)
+    hue, sat, val = hsv[..., 0], hsv[..., 1] / 255, hsv[..., 2] / 255
+    core = region & (sat > .35) & (val > .35)
+    if core.sum() < 4:
+        return region
+    ang = hue[core] * 2 * np.pi / 180
+    mean_hue = (np.degrees(np.arctan2(np.sin(ang).mean(), np.cos(ang).mean())) % 360) / 2
+    dh = np.abs((hue - mean_hue + 90) % 180 - 90)
+    cand = (dh < 14) & (sat > .28) & (val > .12)
+    near = cv2.dilate(region.astype(np.uint8), np.ones((9, 9), np.uint8)) > 0
+    cand &= near
+    n, lab = cv2.connectedComponents((cand | region).astype(np.uint8), connectivity=8)
+    keep = np.unique(lab[region])
+    grown = np.isin(lab, keep[keep > 0])
+    return grown if grown.sum() <= 2.5 * region.sum() else region
+
+
+def swap_measure(rgb, healed, core, region):
+    """What the element looks like, measured from the picture itself: its shading (brightness variation over its body), its outline
+    (rim colour and width) and the shadow it casts on the surface (strength and direction)."""
+    h, w = region.shape
+    ys, xs = np.nonzero(region)
+    x0, x1, y0, y1 = xs.min(), xs.max(), ys.min(), ys.max()
+    lum = lambda im: im[..., 0] * .299 + im[..., 1] * .587 + im[..., 2] * .114
+    body = cv2.erode(core.astype(np.uint8), np.ones((3, 3), np.uint8)) > 0
+    if body.sum() < 6:
+        body = core
+    base = rgb[body].astype(np.float32).mean(0)
+    # shading: brightness ratio over the body, filled outwards so it covers the whole box, then stretched onto any new shape
+    ratio = np.ones((h, w), np.float32)
+    lbase = max(float(lum(base[None, None, :])[0, 0]), 1.0)
+    ratio[body] = np.clip(lum(rgb.astype(np.float32))[body] / lbase, .55, 1.45)
+    wgt = body.astype(np.float32)
+    sig = max(1.5, (x1 - x0) / 6)
+    num = cv2.GaussianBlur(ratio * wgt, (0, 0), sig)
+    den = cv2.GaussianBlur(wgt, (0, 0), sig)
+    filled = np.where(den > 1e-3, num / np.maximum(den, 1e-3), 1.0)
+    shade = filled[y0:y1 + 1, x0:x1 + 1].astype(np.float32)
+    # outline: the 1 px rim of the element against the body
+    rim = region & ~(cv2.erode(region.astype(np.uint8), np.ones((3, 3), np.uint8)) > 0)
+    outline = None
+    if rim.sum() >= 4:
+        rim_c = rgb[rim].astype(np.float32).mean(0)
+        if np.abs(rim_c - base).max() > 14 and lum(rim_c[None, None, :])[0, 0] < lbase - 8:
+            outline = rim_c                                    # a darker rim: keep it as the new shape's outline
+    # cast shadow: how much darker the surface beside the element is in the original than in the healed picture
+    band = (cv2.dilate(region.astype(np.uint8), np.ones((2 * int(max(x1 - x0, y1 - y0) * .8) + 3,) * 2, np.uint8)) > 0) & ~(cv2.dilate(region.astype(np.uint8), np.ones((5, 5), np.uint8)) > 0)
+    drop = np.clip((lum(healed) - lum(rgb.astype(np.float32))) / np.maximum(lum(healed), 1), 0, 1) * band
+    strength = float(drop[band].mean()) if band.any() else 0.0
+    cx, cy = (x0 + x1) / 2, (y0 + y1) / 2
+    dy_, dx_ = np.nonzero(drop > .04)
+    if len(dx_) > 8 and strength > .02:
+        v = np.array([dx_.mean() - cx, dy_.mean() - cy], np.float32)
+        v = v / max(np.linalg.norm(v), 1e-3)
+    else:
+        v = np.array([.6, .8], np.float32)                     # nothing measured: light from the top left
+    return {"base": base, "shade": shade, "outline": outline, "shadow": strength, "dir": v, "box": (x0, y0, x1, y1)}
+
+
+def swap_surface(healed, region, box):
+    """Is the element flat on the picture or does it lie on a curved surface (a cheek, a ball, a fold)? Measured from the healed
+    picture around it: a quadratic fit of the surface brightness gives the tilt (direction + strength of the gradient) and the
+    bulge (convex or concave). Returns None for a flat element, else a dict used to bend the new shape the same way."""
+    h, w = region.shape
+    x0, y0, x1, y1 = box
+    size = max(x1 - x0 + 1, y1 - y0 + 1)
+    r_out = int(size * 1.1) + 4
+    near = cv2.dilate(region.astype(np.uint8), np.ones((5, 5), np.uint8)) > 0
+    far = cv2.dilate(region.astype(np.uint8), cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (2 * r_out + 1,) * 2)) > 0
+    ring = far & ~near
+    if ring.sum() < 60:
+        return None
+    lum = healed[..., 0] * .299 + healed[..., 1] * .587 + healed[..., 2] * .114
+    cx, cy = (x0 + x1) / 2.0, (y0 + y1) / 2.0
+    ys, xs = np.nonzero(ring)
+    u, v = (xs - cx) / r_out, (ys - cy) / r_out
+    z = lum[ys, xs].astype(np.float64)
+    mean = max(float(z.mean()), 8.0)
+    z = z / mean - 1
+    # robust: ignore texture (hair, lines) by clipping outliers around the median before fitting
+    keep = np.abs(z - np.median(z)) < 3 * max(float(np.std(z)), 1e-3)
+    u, v, z = u[keep], v[keep], z[keep]
+    if len(z) < 60:
+        return None
+    A = np.stack([np.ones_like(u), u, v, u * u, v * v, u * v], 1)
+    coef, *_ = np.linalg.lstsq(A, z, rcond=None)
+    fit = A @ coef
+    var = float(z.var())
+    r2 = 1 - float(((z - fit) ** 2).mean()) / var if var > 1e-9 else 0.0
+    gx, gy = float(coef[1]), float(coef[2])
+    tilt = math.hypot(gx, gy)
+    bend = float(coef[3] + coef[4])
+    # curved if a smooth gradient/bulge explains the surroundings and is big enough to see across the element
+    if r2 < .3 or (tilt < .05 and abs(bend) < .05):
+        return None
+    return {"tilt": min(tilt, .8), "dir": np.array([gx, gy]) / max(tilt, 1e-6), "bulge": float(np.clip(-bend * .8, -.25, .25)), "r2": r2}
+
+
+def swap_bend(shape, bw, bh, size, surf):
+    """Shape alpha (bh x bw) laid onto a curved surface: foreshortened along the brightness gradient (the surface turns away there)
+    and pulled in or out at the edges by the bulge."""
+    s = 3
+    hi = swap_shape_alpha(shape, bw * s, bh * s, size)
+    gx, gy = float(surf["dir"][0]), float(surf["dir"][1])
+    c = 1.0 / (1.0 + surf["tilt"] * .55)
+    n = 2
+    xx, yy = np.meshgrid((np.arange(bw * n) + .5) / n - bw / 2.0, (np.arange(bh * n) + .5) / n - bh / 2.0)
+    p, q = xx * gx + yy * gy, -xx * gy + yy * gx
+    p = p / c
+    rho2 = (p * p + q * q) / max((bw * bw + bh * bh) / 4.0, 1.0)
+    k = 1 + surf["bulge"] * rho2
+    p, q = p * k, q * k
+    ux, uy = p * gx - q * gy, p * gy + q * gx
+    mx = ((ux + bw / 2.0) * s).astype(np.float32)
+    my = ((uy + bh / 2.0) * s).astype(np.float32)
+    warped = cv2.remap(hi, mx, my, cv2.INTER_LINEAR, borderMode=cv2.BORDER_CONSTANT, borderValue=0)
+    return cv2.resize(warped, (bw, bh), interpolation=cv2.INTER_AREA)
+
+
+def swap_join_split(rgb, picked, tol):
+    """A strand across the element cuts it into pieces and a single picked point only reaches one. Take the pieces of the same colour
+    that lie right beside it (within a strand's width) - they belong to the same element."""
+    ys, xs = np.nonzero(picked)
+    size = max(xs.max() - xs.min() + 1, ys.max() - ys.min() + 1)
+    k = max(7, int(size * .5)) | 1
+    near = cv2.dilate(picked.astype(np.uint8), cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (k, k))) > 0
+    mean = rgb[picked].astype(np.float32).mean(0)
+    same = np.abs(rgb.astype(np.float32) - mean).max(2) <= max(tol * 1.7, 34)
+    n, lab = cv2.connectedComponents(same.astype(np.uint8), connectivity=4)
+    ids = np.unique(lab[near & same])
+    grown = picked | np.isin(lab, ids[ids > 0])
+    return grown if grown.sum() <= 3 * picked.sum() else picked
+
+
+def swap_occluders(rgb, picked, level=95):
+    """Things lying OVER the element (a strand of hair across a heart) are not part of it: they show up as a gap inside the element's
+    closed outline whose colour is clearly not the surface. Returns that mask (bool); it stays on top, whatever is taken out or put in."""
+    ys, xs = np.nonzero(picked)
+    size = max(xs.max() - xs.min() + 1, ys.max() - ys.min() + 1)
+    k = max(5, int(size * .45)) | 1
+    closed = cv2.morphologyEx(np.pad(picked.astype(np.uint8), k), cv2.MORPH_CLOSE, np.ones((k, k), np.uint8))[k:-k, k:-k] > 0
+    gap = closed & ~picked
+    if gap.sum() < 3:
+        return np.zeros_like(picked)
+    surface = swap_heal(rgb, closed)
+    lum = lambda im: im[..., 0] * .299 + im[..., 1] * .587 + im[..., 2] * .114
+    l_elem = float(lum(rgb.astype(np.float32))[picked].mean())
+    darker = lum(rgb.astype(np.float32)) < np.minimum(l_elem * .5, lum(surface) - 25)   # clearly darker than the element AND the surface: line work lying over both
+    reach = cv2.dilate(closed.astype(np.uint8), np.ones((9, 9), np.uint8)) > 0     # also the part just outside the outline (the heal would eat it)
+    occ = reach & ~picked & darker
+    # a single strand is a THIN dark line across the element, not a lump: dark pixels that survive no 3x3 opening are lines 1-2 px wide;
+    # wide dark areas are just the element in shade and get healed like the rest
+    flum = lum(rgb.astype(np.float32)).astype(np.float32)
+    dark = ((flum < l_elem * .8) & (cv2.dilate(picked.astype(np.uint8), np.ones((3, 3), np.uint8)) > 0)).astype(np.uint8)
+    thin = cv2.morphologyEx(flum, cv2.MORPH_BLACKHAT, cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (5, 5)))   # lines up to ~3 px wide that are darker than both sides
+    zone = dark > 0
+    if level is not None and zone.sum() >= 8:                                        # relative to this picture: the strongest thin lines in the element's dark part, not a fixed number
+        top = float(np.percentile(thin[zone], level))
+        strong = zone & (thin >= max(5.0, .6 * top))
+        weak = zone & (thin >= max(4.0, .45 * top))             # hysteresis: faint parts of a line count when they hang on a clear part
+        nw, lw = cv2.connectedComponents(weak.astype(np.uint8), connectivity=8)
+        line = np.isin(lw, np.unique(lw[strong])[np.unique(lw[strong]) > 0])
+    else:
+        line = zone & False
+    nl_, ll, stt, _ = cv2.connectedComponentsWithStats(line.astype(np.uint8), connectivity=8)
+    line = np.isin(ll, [i for i in range(1, nl_) if stt[i, cv2.CC_STAT_AREA] >= 6])   # a strand is a connected line, specks are not
+    occ |= line & ~(cv2.dilate(picked.astype(np.uint8), np.ones((3, 3), np.uint8)) == 0)
+    n, lab, st, _ = cv2.connectedComponentsWithStats(occ.astype(np.uint8), connectivity=8)
+    keep = np.zeros_like(occ)
+    for i in range(1, n):
+        if st[i, cv2.CC_STAT_AREA] >= 3:
+            keep |= lab == i
+    return keep
+
+
+def swap_score(rgb, out, region, occ, base):
+    """How good is a removal? Lower is better. Looks for what a viewer would notice: left-over element colour, hard new edges where
+    the heal meets the picture, and strand pixels that were kept without being a real line (a lump)."""
+    f = rgb.astype(np.float32)
+    o = np.clip(out, 0, 255)
+    zone = cv2.dilate(region.astype(np.uint8), np.ones((5, 5), np.uint8)) > 0
+    residue = float(((np.abs(o - base[None, None, :]).max(2) < 45) & zone).sum()) / max(zone.sum(), 1)
+    lum = lambda im: im[..., 0] * .299 + im[..., 1] * .587 + im[..., 2] * .114
+    gy, gx = np.gradient(cv2.GaussianBlur(lum(o).astype(np.float32), (0, 0), .8))
+    g_out = np.hypot(gx, gy)
+    gy, gx = np.gradient(cv2.GaussianBlur(lum(f).astype(np.float32), (0, 0), .8))
+    g_in = np.hypot(gx, gy)
+    ring = (cv2.dilate(region.astype(np.uint8), np.ones((9, 9), np.uint8)) > 0) & ~zone
+    seam = abs(float(g_out[zone].mean()) - float(g_in[ring].mean())) / (float(g_in[ring].mean()) + 4)   # the healed place should be as busy as its surroundings
+    lump = float(occ.sum()) / max(zone.sum(), 1)                                                       # strand pixels beyond a thin line count against it
+    # thin dark lines that were in the picture there must still be there: a strand lost in the heal is a visible change
+    kern = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (5, 5))
+    line_in = float(cv2.morphologyEx(lum(f).astype(np.float32), cv2.MORPH_BLACKHAT, kern)[zone & (lum(f) < lum(base[None, None, :])[0, 0] * .8)].sum())
+    line_out = float(cv2.morphologyEx(lum(o).astype(np.float32), cv2.MORPH_BLACKHAT, kern)[zone & (lum(f) < lum(base[None, None, :])[0, 0] * .8)].sum())
+    lost = max(0.0, line_in - line_out) / max(line_in, 1.0)
+    reddish = float(((f[..., 0] - f[..., 1] > 35) & occ).sum()) / max(float(occ.sum()), 1.0)   # a 'strand' that is red is element, not hair
+    return 12 * residue + seam + 1.5 * max(0.0, lump - .12) + 1.2 * lost + 4 * reddish
+
+
+def swap_remove(rgb, picked, region0, base):
+    """Take the element out. The strand lying over it is found at several strengths; each result is scored by swap_score and the best
+    one is used - no per-picture tuning by the caller. Returns (out, region, occ, soft, strand, chosen level, score)."""
+    best = None
+    for level in (None, 99, 95, 85, 70, 50):
+        occ = swap_occluders(rgb, picked, level)
+        region = region0 & ~occ
+        if not region.any():
+            continue
+        out = swap_heal(rgb, region | occ)
+        strand, soft = swap_strand_pixels(rgb, out, occ, picked)
+        out = out * (1 - soft[:, :, None]) + strand * soft[:, :, None]
+        sc = swap_score(rgb, out, region, occ, base)
+        if best is None or sc < best[-1] - 1e-4:
+            best = (out, region, occ, soft, strand, level, sc)
+    return best
+
+
+def swap_strand_pixels(rgb, healed, occ, picked):
+    """The top layer (hair) is never changed: the strand keeps its original pixels exactly, on top of whatever lies below it.
+    Returns (pixels, mask)."""
+    return rgb.astype(np.float32), occ.astype(np.float32)
+
+
+def swap_hair_layer(rgb, out, picked, region, base):
+    """The top layer (hair) next to and over the element is protected: pixels in the touched area that are clearly darker than the healed
+    surface and not element-coloured are hair. Returns (mask, opacity, hair colour): opacity says how much of each pixel is hair, so the
+    layer can lie over a NEW shape with the same see-through edges it had over the old one."""
+    f = rgb.astype(np.float32)
+    lum = lambda im: im[..., 0] * .299 + im[..., 1] * .587 + im[..., 2] * .114
+    zone = (cv2.dilate(region.astype(np.uint8), np.ones((5, 5), np.uint8)) > 0) & ~picked
+    dist = np.abs(f - base[None, None, :]).max(2)
+    hair = zone & (lum(f) < lum(out) - 55) & (lum(f) < 115) & (dist > 60)   # dark: hair, not a pink antialiased rim of the element
+    if hair.sum() < 3:
+        return np.zeros(picked.shape, bool), np.zeros(picked.shape, np.float32), None
+    colour = f[hair & (lum(f) <= np.percentile(lum(f)[hair], 40))].mean(0)
+    l_h = float(lum(colour[None, None, :])[0, 0])
+    opacity = np.clip((lum(out) - lum(f)) / np.maximum(lum(out) - l_h, 20.0), 0, 1) * hair
+    return hair, opacity.astype(np.float32), colour
+
+
+def cmd_swap(a):
+    """Take an element out of a picture (picked with one point), heal the place and, if asked, set a new shape there that looks like
+    it belongs: pixelcut measures the original element's shading, outline and cast shadow and gives them to the new shape."""
+    refuse_inputs([a.input], [a.output] + ([a.cut] if a.cut else []))
+    rgb = load_rgb(a.input)
+    h, w = rgb.shape[:2]
+    try:
+        points = [tuple(int(v) for v in pt.split(",")) for pt in a.at.split(";")]
+        if any(len(pt) != 2 for pt in points):
+            raise ValueError
+    except ValueError:
+        sys.exit("error: --at must look like x,y (whole numbers; several points: x,y;x,y)")
+    for px, py in points:
+        if not (0 <= px < w and 0 <= py < h):
+            sys.exit("error: --at point %d,%d lies outside the picture (%dx%d)" % (px, py, w, h))
+    if a.shape not in SWAP_SHAPES:
+        sys.exit("error: --shape must be one of %s" % ", ".join(SWAP_SHAPES))
+    for name, val, lo, hi in (("--tolerance", a.tolerance, 1, 255), ("--grow", a.grow, 0, 20), ("--size", a.size, .2, 4), ("--shadow", a.shadow, 0, 1)):
+        if val is not None and (not np.isfinite(val) or not (lo <= val <= hi)):
+            sys.exit("error: %s must be between %g and %g" % (name, lo, hi))
+    picked, t = swap_pick_region(rgb, points, a.tolerance)
+    picked = swap_join_split(rgb, picked, t)
+    core0 = picked.copy()
+    if a.tolerance is None:
+        picked = swap_add_tinted(rgb, picked)
+    if picked.sum() > .25 * h * w:
+        sys.exit("error: the picked colour covers more than a quarter of the picture - pick a point on a small element or lower --tolerance")
+    if picked.sum() < 4:
+        sys.exit("error: almost nothing was picked at --at %s - raise --tolerance or pick the middle of the element" % a.at)
+    region = picked
+    if a.grow:
+        region = cv2.dilate(picked.astype(np.uint8), cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (2 * a.grow + 1,) * 2)) > 0
+    base_col = rgb[picked].astype(np.float32).mean(0)
+    out, region, occ, soft, strand, level, score = swap_remove(rgb, picked, region, base_col)   # tries several strand strengths and keeps the best
+    hair, hair_a, hair_c = swap_hair_layer(rgb, out, picked, region, base_col)
+    out = np.where(hair[:, :, None], rgb.astype(np.float32), out)   # the top layer (hair) is never changed
+    ys, xs = np.nonzero(region)
+    x0, x1, y0, y1 = xs.min(), xs.max(), ys.min(), ys.max()
+    surf = swap_surface(out, region, (x0, y0, x1, y1))         # analysis first: flat 2D picture or a surface with 3D shading?
+    if a.cut:
+        layer = np.zeros((h, w, 4), np.uint8)
+        layer[:, :, :3] = rgb
+        layer[:, :, 3] = region.astype(np.uint8) * 255
+        save_atomic(Image.fromarray(layer[y0:y1 + 1, x0:x1 + 1], "RGBA"), a.cut)
+    note = ""
+    if a.shape != "none":
+        meas = swap_measure(rgb, out, picked, region)
+        bw, bh = x1 - x0 + 1, y1 - y0 + 1
+        shape_a = np.zeros((h, w), np.float32)
+        if surf is None or a.flat_surface:
+            shape_a[y0:y1 + 1, x0:x1 + 1] = swap_shape_alpha(a.shape, bw, bh, a.size)
+        else:                                                  # the element sits on a curved surface: bend the new shape the same way
+            shape_a[y0:y1 + 1, x0:x1 + 1] = swap_bend(a.shape, bw, bh, a.size, surf)
+        colour = meas["base"]
+        if a.colour is not None:
+            try:
+                colour = np.array([int(a.colour.lstrip("#")[i:i + 2], 16) for i in (0, 2, 4)], np.float32)
+            except ValueError:
+                sys.exit("error: --colour must look like #rrggbb")
+        paint = np.zeros((h, w, 3), np.float32)
+        paint[:] = colour
+        if not a.flat:                                         # the new shape gets the original's shading
+            shade = cv2.resize(meas["shade"], (bw, bh), interpolation=cv2.INTER_LINEAR)
+            paint[y0:y1 + 1, x0:x1 + 1] = np.clip(colour[None, None, :] * shade[:, :, None], 0, 255)
+        if meas["outline"] is not None and not a.flat:         # ... and its outline: a rim of the same colour and ~1 px width
+            inner = cv2.erode(shape_a, np.ones((3, 3), np.uint8))
+            rimw = np.clip(shape_a - inner, 0, 1)
+            paint = paint * (1 - rimw[:, :, None] * .8) + meas["outline"][None, None, :] * (rimw[:, :, None] * .8)
+        vx_s, vy_s = float(meas["dir"][0]), float(meas["dir"][1])
+        strength = a.shadow if a.shadow is not None else min(max(meas["shadow"] * 3, .12), .45)
+        if strength > 0:                                       # a tight contact shadow plus a wider soft one, in the measured direction
+            scale = max(bw, bh) / 16.0
+            vx, vy = float(meas["dir"][0]), float(meas["dir"][1])
+
+            def shifted(blur, dist):
+                m = np.float32([[1, 0, vx * dist * scale], [0, 1, vy * dist * scale]])
+                return cv2.GaussianBlur(cv2.warpAffine(shape_a, m, (w, h)), (0, 0), max(.5, blur))
+            sh = 1 - (1 - .55 * shifted(.6 * scale + .4, .8)) * (1 - .45 * shifted(2.0 * scale + .6, 2.6))
+            sh = np.clip(sh * strength * 1.6, 0, .85) * (1 - shape_a)
+            out = out * (1 - .55 * sh[:, :, None])             # multiply: the surface below gets darker but keeps its own colour and texture
+        out = out * (1 - shape_a[:, :, None]) + paint * shape_a[:, :, None]
+        top = soft[:, :, None]                                 # ... and lies on top of the new shape again
+        out = out * (1 - top) + strand * top
+        if hair_c is not None:                                 # hair over the new shape: see-through at its edges exactly as before, solid where it was solid
+            ha = hair_a[:, :, None]
+            over = np.where(ha > .9, rgb.astype(np.float32), out * (1 - ha) + hair_c[None, None, :] * ha)
+            out = np.where(hair[:, :, None], over, out)
+        caster = np.maximum(occ.astype(np.float32), hair_a)    # everything on the hair layer throws a faint shadow onto the new shape, like onto the old one
+        cast = cv2.GaussianBlur(cv2.warpAffine(caster, np.float32([[1, 0, vx_s * 2.0], [0, 1, vy_s * 2.0]]), (w, h)), (0, 0), 1.0)
+        out = out * (1 - (.22 * cast * shape_a * (1 - np.clip(caster, 0, 1)))[:, :, None])
+        note = ", new %s (shading%s%s, shadow %.0f%%)" % (a.shape, " kept" if not a.flat else " off", " + outline" if meas["outline"] is not None and not a.flat else "", strength * 100)
+        note += "; surface: " + ("flat" if surf is None or a.flat_surface else "curved (%s, tilt %.0f%%) - shape bent to follow it" % ("convex" if surf["bulge"] > .03 else "concave" if surf["bulge"] < -.03 else "tilted", surf["tilt"] * 100))
+    save_atomic(Image.fromarray(np.clip(out, 0, 255).round().astype(np.uint8)), a.output)
+    changed = (np.clip(out, 0, 255).round().astype(np.uint8) != rgb).any(2)
+    cy, cx = np.nonzero(changed)
+    area = "" if len(cx) == 0 else " in a %dx%d px area" % (cx.max() - cx.min() + 1, cy.max() - cy.min() + 1)
+    look = "flat 2D picture, no 3D shading to follow" if surf is None else "3D surface (%s, tilt %.0f%%): shading and curvature are followed" % ("convex" if surf["bulge"] > .03 else "concave" if surf["bulge"] < -.03 else "tilted", surf["tilt"] * 100)
+    print("analysis: %s; %s" % (look, ("depth: %d px lie in front of the element and stay in front" % int(occ.sum())) if occ.any() else "depth: nothing lies in front of the element"))
+    print("wrote %s (picked %d px at %s, tolerance %d%s)" % (a.output, int(picked.sum()), a.at, t, note))
+    print("check: %d of %d pixels changed%s, the rest (%.2f%%) is identical to the original" % (int(changed.sum()), h * w, area, 100 * (1 - changed.mean())))
+
+
+# ----------------------------------------------------------------------------- regions (the harness: lets an AI pick elements without pixel guessing)
+def cmd_regions(a):
+    """Number the distinct elements of a picture. Writes regions.png (the picture with numbered boxes) and regions.json (id, a point
+    inside the element for `swap --at`, bounding box, colour, area) - an assistant looks at the numbered picture and names an id."""
+    out = Path(a.outdir)
+    refuse_inputs([a.input], [out / "regions.png", out / "regions.json"])
+    rgb = load_rgb(a.input)
+    h, w = rgb.shape[:2]
+    if not (a.min_area >= 1 and 1 <= a.max <= 200):
+        sys.exit("error: --min-area must be at least 1 and --max between 1 and 200")
+    flat = cv2.pyrMeanShiftFiltering(np.ascontiguousarray(rgb), 6, 22) if h * w <= 2_000_000 else rgb   # smooth gradients/antialiasing so one element stays one region
+    q = (flat // 48).astype(np.int32)
+    key = q[..., 0] * 100 + q[..., 1] * 10 + q[..., 2]
+    found = []
+    for k in np.unique(key):
+        m = cv2.morphologyEx((key == k).astype(np.uint8), cv2.MORPH_OPEN, np.ones((3, 3), np.uint8))   # cut thin bridges: a heart must not stay glued to an eye
+        n, lab, st, _ = cv2.connectedComponentsWithStats(m, connectivity=4)
+        for i in range(1, n):
+            area = int(st[i, cv2.CC_STAT_AREA])
+            if area < a.min_area or area > .2 * h * w:
+                continue
+            comp = lab == i
+            ring = (cv2.dilate(comp.astype(np.uint8), np.ones((5, 5), np.uint8)) > 0) & ~comp
+            if not ring.any():
+                continue
+            col = rgb[comp].astype(np.float32).mean(0)
+            contrast = float(np.abs(rgb[ring].astype(np.float32).mean(0) - col).max())
+            if contrast < 25:
+                continue
+            found.append((contrast * min(area, 120) ** .5, i, comp, area, col, st[i]))
+    found.sort(key=lambda f: -f[0])
+    picked, used = [], np.zeros((h, w), bool)
+    for score, i, comp, area, col, st in found:               # best first; skip a candidate that mostly lies inside one already chosen
+        if (comp & used).sum() > .5 * area:
+            continue
+        picked.append((comp, area, col, st))
+        used |= comp
+        if len(picked) >= a.max:
+            break
+    if not picked:
+        sys.exit("error: no distinct elements found (try a lower --min-area)")
+    scale = max(1, int(np.ceil(900 / max(h, w))))
+    over = cv2.resize(rgb, (w * scale, h * scale), interpolation=cv2.INTER_NEAREST) if scale > 1 else rgb.copy()
+    info = []
+    for n_, (comp, area, col, st) in enumerate(picked, 1):
+        dist = cv2.distanceTransform(comp.astype(np.uint8), cv2.DIST_L2, 3)
+        py, px = np.unravel_index(int(dist.argmax()), dist.shape)
+        x, y, bw, bh = int(st[cv2.CC_STAT_LEFT]), int(st[cv2.CC_STAT_TOP]), int(st[cv2.CC_STAT_WIDTH]), int(st[cv2.CC_STAT_HEIGHT])
+        info.append({"id": n_, "at": "%d,%d" % (px, py), "box": [x, y, x + bw - 1, y + bh - 1], "area": area,
+                     "colour": "#%02x%02x%02x" % tuple(int(round(v)) for v in col)})
+        cv2.rectangle(over, (x * scale, y * scale), ((x + bw) * scale, (y + bh) * scale), (255, 255, 0), 1)
+        cv2.putText(over, str(n_), (x * scale + 1, max(10, y * scale - 2)), cv2.FONT_HERSHEY_SIMPLEX, .45, (0, 0, 0), 3, cv2.LINE_AA)
+        cv2.putText(over, str(n_), (x * scale + 1, max(10, y * scale - 2)), cv2.FONT_HERSHEY_SIMPLEX, .45, (255, 255, 0), 1, cv2.LINE_AA)
+    out.mkdir(parents=True, exist_ok=True)
+    work, _ = scratch_beside(out / "regions.png")
+    try:
+        Image.fromarray(over).save(work / "regions.png")
+        (work / "regions.json").write_text(json.dumps({"size": [w, h], "regions": info}, indent=1), encoding="utf-8")
+        publish([(work / n, out / n) for n in ("regions.png", "regions.json")])
+    finally:
+        shutil.rmtree(work, ignore_errors=True)
+    print("wrote regions.png and regions.json (%d elements; use the id's 'at' with swap --at)" % len(info))
+
+
+# ----------------------------------------------------------------------------- tools (machine-readable description for AI agents)
+def cmd_tools(a):
+    """Print every command as a tool definition (name, description, JSON schema) that an AI agent can register as is."""
+    import io
+    tools = []
+    parser = build_parser()
+    sub = next(act for act in parser._actions if isinstance(act, argparse._SubParsersAction))
+    helps = {c.dest: c.help for c in sub._choices_actions}
+    for name, sp in sub.choices.items():
+        props, req = {}, []
+        for act in sp._actions:
+            if act.dest in ("help", "fn"):
+                continue
+            if act.option_strings:
+                key = act.dest
+                typ = "boolean" if act.nargs == 0 else ("number" if act.type in (float, int) else "string")
+                props[key] = {"type": typ, "description": act.help or ""}
+                if act.required:
+                    req.append(key)
+            else:
+                props[act.dest] = {"type": "string", "description": "positional: " + act.dest}
+                req.append(act.dest)
+        tools.append({"name": "pixelcut_" + name, "description": helps.get(name) or name, "input_schema": {"type": "object", "properties": props, "required": req}})
+    print(json.dumps({"tool_prefix": "pixelcut", "usage": "python pixelcut.py <command> <positional...> --option value", "tools": tools}, indent=1))
+
+
 # ----------------------------------------------------------------------------- join / compare
 def cmd_join(a):
     """Put parts back together (over white or a colour) - the way to 'rebuild' a picture from its exact pieces."""
@@ -1304,6 +1805,29 @@ def build_parser(parser_class=argparse.ArgumentParser):
     s.add_argument("--close", type=int, default=9, help="closing kernel px, joins letters and fills gaps")
     s.set_defaults(fn=cmd_key)
 
+    s = sub.add_parser("swap", help="take an element out (pick it with one point), heal the place, optionally set a new shape there with an automatic shadow")
+    s.add_argument("input"); s.add_argument("output")
+    s.add_argument("--at", required=True, help="x,y: a point on the element (its colour is picked, the connected area is taken); several points x,y;x,y add areas, e.g. a darker part over hair")
+    s.add_argument("--tolerance", type=float, default=None, help="how far a colour may differ from the picked one and still belong to the element (default: automatic)")
+    s.add_argument("--grow", type=int, default=3, help="px added around the element so its soft rim goes too")
+    s.add_argument("--shape", default="none", help="none (just remove), diamond, square, circle, heart or star")
+    s.add_argument("--size", type=float, default=1.0, help="size of the new shape relative to the element")
+    s.add_argument("--colour", help="#rrggbb for the new shape (default: the colour of the removed element)")
+    s.add_argument("--shadow", type=float, default=None, help="shadow strength 0..1 (default: measured from the original element)")
+    s.add_argument("--flat", action="store_true", help="draw the new shape flat: no shading and no outline taken from the original")
+    s.add_argument("--cut", help="also save the removed element (exact pixels) as a transparent png")
+    s.add_argument("--flat-surface", action="store_true", help="do not bend the new shape to the surface (it is detected automatically)")
+    s.set_defaults(fn=cmd_swap)
+
+    s = sub.add_parser("regions", help="number the distinct elements of a picture (regions.png + regions.json) so an assistant can pick one by id")
+    s.add_argument("input"); s.add_argument("outdir")
+    s.add_argument("--min-area", type=int, default=12, help="smallest element in px")
+    s.add_argument("--max", type=int, default=60, help="most elements to number")
+    s.set_defaults(fn=cmd_regions)
+
+    s = sub.add_parser("tools", help="print all commands as tool definitions (JSON) for AI agents")
+    s.set_defaults(fn=cmd_tools)
+
     s = sub.add_parser("join", help="put parts_dir/part_*.png back together over white")
     s.add_argument("parts"); s.add_argument("output")
     s.set_defaults(fn=cmd_join)
@@ -1343,6 +1867,41 @@ BATCH_OUTPUT = {"alpha": ".png", "labels": ".png", "trace": ".svg", "upscale": N
 BATCH_DIR_DONE = {"split": ("parts.json",), "key": ("base.png", "element.png", "preview.png")}
 
 
+def place_chain(path):
+    """Identity of a place and of every folder above it - by (device, file id) of what exists, not by spelling. Long-path, UNC and forward-slash spellings, 8.3 names, junctions and links all name the same place and give the same chain. Not-yet-existing tails are
+    keyed by their parts under the deepest existing folder."""
+    p = Path(os.path.abspath(str(path)))
+    try:
+        p = p.resolve()
+    except OSError:
+        pass
+    tail, chain, node = [], [], p
+    while True:
+        try:
+            st = os.stat(str(node))
+            base = ("e", st.st_dev, st.st_ino)
+            break
+        except OSError:
+            if node.parent == node:
+                return [("p", os.path.normcase(str(p)))]
+            tail.append(os.path.normcase(node.name))
+            node = node.parent
+    chain = [("n", base, tuple(reversed(tail[i:]))) if tail[i:] else base for i in range(len(tail) + 1)]
+    while node.parent != node:                                # existing ancestors
+        node = node.parent
+        try:
+            st = os.stat(str(node))
+            chain.append(("e", st.st_dev, st.st_ino))
+        except OSError:
+            break
+    return chain                                              # chain[0] = the place itself
+
+
+def place_inside(path, folder_key):
+    """True when `path` lies below the place `folder_key` (a chain[0] of the folder)."""
+    return folder_key in place_chain(path)[1:]
+
+
 def batch_pictures(folder, recursive, not_inside=None):
     """Pictures of a folder, sorted. Hidden files/folders are skipped, and so are folders that are links/junctions (they point somewhere
     else - and may point back into this folder), and the output folder when it lies inside the input folder."""
@@ -1350,7 +1909,7 @@ def batch_pictures(folder, recursive, not_inside=None):
     for root, dirs, files in os.walk(folder, followlinks=False):
         root = Path(root)
         dirs[:] = sorted(d for d in dirs if recursive and not d.startswith(".") and not link_like(root / d)
-                         and not (not_inside and (root / d).resolve() == not_inside))
+                         and not (not_inside and place_chain(root / d)[0] == not_inside))
         found += [root / f for f in sorted(files) if not f.startswith(".") and Path(f).suffix.lower() in BATCH_PICTURES]
     return found
 
@@ -1371,7 +1930,8 @@ def cmd_batch(a):
     src, dst = Path(a.input_dir), Path(a.output_dir)
     if not src.is_dir():
         sys.exit("error: %s is not a folder" % src)
-    if dst.resolve() == src.resolve():
+    src_key, dst_key = place_chain(src)[0], place_chain(dst)[0]
+    if dst_key == src_key:
         sys.exit("error: the output folder must be a different folder than the input folder")
     if dst.exists() and not dst.is_dir():
         sys.exit("error: %s exists and is not a folder" % dst)
@@ -1381,7 +1941,7 @@ def cmd_batch(a):
         sys.exit("error: %s" % e)
     if getattr(parsed, "render", None):                       # checked on the parsed value: argparse accepts abbreviations such as --rend
         sys.exit("error: --render names one file - every picture would overwrite it; render the SVGs afterwards")
-    inside = dst.resolve() if src.resolve() in dst.resolve().parents else None
+    inside = dst_key if place_inside(dst, src_key) else None
     pictures = batch_pictures(src, a.recursive, inside)
     if not pictures:
         sys.exit("error: no pictures (%s) in %s%s" % (", ".join(BATCH_PICTURES), src, "" if a.recursive else " (without --recursive only the folder itself is read)"))
@@ -1393,10 +1953,11 @@ def cmd_batch(a):
     names = {}
     for pic, name in plan:
         names.setdefault(name.as_posix().lower(), []).append(pic.relative_to(src).as_posix())
-    inputs = {os.path.normcase(str(p.resolve())) for p, _ in plan}
+    chains = [place_chain(p) for p, _ in plan]
+    inputs = {c[0] for c in chains}
     for pic, name in plan:                                    # an output that lands on (or above) an input would destroy it - also when dst is an ancestor of src
-        t = os.path.normcase(str((dst / name).resolve()))
-        if t in inputs or (kind == "dir" and any(i.startswith(t + os.sep) for i in inputs)):
+        tc = place_chain(dst / name)
+        if tc[0] in inputs or (kind == "dir" and any(tc[0] in c for c in chains)) or (inside is None and src_key in tc[1:]):
             sys.exit("error: the output of %s would overwrite one of the input pictures (%s); use an output folder that does not contain the input folder" % (pic.relative_to(src).as_posix(), name.as_posix()))
     dst.mkdir(parents=True, exist_ok=True)
     done, skipped, failed = 0, 0, []
@@ -1417,11 +1978,13 @@ def cmd_batch(a):
             print("%s: skipped (%s exists, use --overwrite)" % (label, name.as_posix()))
             continue
         try:
-            if pic.suffix.lower() == ".gif":
+            frames = 1
+            try:
                 from PIL import Image
                 with Image.open(pic) as g:
-                    if getattr(g, "n_frames", 1) > 1:
-                        print("    note: %s has %d frames - only the first one is used" % (rel.as_posix(), g.n_frames))
+                    frames = getattr(g, "n_frames", 1)
+            except Exception:
+                pass                                          # unreadable: the run itself reports it
             target.parent.mkdir(parents=True, exist_ok=True)
             with warnings.catch_warnings(record=True) as notes:
                 warnings.simplefilter("always")
@@ -1431,6 +1994,8 @@ def cmd_batch(a):
             print("%s: ok%s" % (label, "".join(" (%s)" % w.message for w in notes if issubclass(w.category, UserWarning))))
             for ln in extra:
                 print("    " + ln)
+            if frames > 1:
+                print("    note: %s has %d frames - only the first one is used" % (rel.as_posix(), frames))
         except (PixelcutError, OSError) as e:
             msg = (oserror_message(e).removeprefix("error: ") if isinstance(e, OSError) and oserror_message(e) else str(e)).splitlines()[0]
             failed.append((rel.as_posix(), msg))
@@ -1546,6 +2111,23 @@ def key(input, outdir, box, **options):
     return Path(outdir)
 
 
+def swap(input, output, at, **options):
+    """Take the element at the point `at` (x,y) out and heal the place. Options: shape (none/diamond/square/circle/heart/star), size,
+    colour, shadow, tolerance, grow, cut. Returns the output path."""
+    if isinstance(at, (list, tuple)) and at and isinstance(at[0], (list, tuple)):
+        at = ";".join("%d,%d" % tuple(pt) for pt in at)       # several points
+    elif isinstance(at, (list, tuple)):
+        at = "%d,%d" % tuple(at)
+    _run("swap", [input, output], dict(options, at=at))
+    return Path(output)
+
+
+def regions(input, outdir, **options):
+    """Number the distinct elements of a picture; returns the list of {id, at, box, area, colour}."""
+    _run("regions", [input, outdir], options)
+    return json.loads((Path(outdir) / "regions.json").read_text(encoding="utf-8"))["regions"]
+
+
 def compare(first, second, resize=False):
     """Returns {'ssim': .., 'mean_diff': .., 'max_diff': ..} for two images."""
     import contextlib
@@ -1592,7 +2174,7 @@ def upscale(input, output, **options):
     return Path(output)
 
 
-__all__ = ["__version__", "PixelcutError", "alpha", "split", "labels", "join", "key", "compare", "trace", "upscale", "batch"]
+__all__ = ["__version__", "PixelcutError", "alpha", "split", "labels", "join", "key", "swap", "regions", "compare", "trace", "upscale", "batch"]
 
 
 if __name__ == "__main__":

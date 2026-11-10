@@ -192,6 +192,39 @@ Bitte vorher lesen, das spart Zeit.
 
 ---
 
+### 8. `swap`: ein Element herausnehmen oder durch eine Form ersetzen, mit Schatten
+
+```bash
+python pixelcut.py swap bild.png ohne.png  --at 196,154                    # Element weg, Stelle geheilt
+python pixelcut.py swap bild.png karo.png  --at 196,154 --shape diamond    # neue Form mit automatischem Schatten
+python pixelcut.py swap bild.png karo.png  --at "196,154;204,154" --shape star --colour "#ffcc00" --cut herz.png
+```
+
+Ein Punkt auf dem Element reicht (`--at x,y`): pixelcut nimmt die zusammenhängende Fläche dieser Farbe (`--tolerance`, `--grow` für den weichen Rand), heilt die Stelle aus der Umgebung und setzt auf Wunsch eine neue Form (`diamond`, `square`, `circle`, `heart`, `star`) dorthin. Den Schatten rechnet pixelcut selbst aus der Form: ein enger Kontaktschatten plus ein weicher, Licht von links oben, multiplikativ, damit der Untergrund seine Farbe und Struktur behält (`--shadow 0` schaltet ihn ab). Mehrere Punkte (`x,y;x,y`) nehmen mehrere Flächen auf, zum Beispiel einen dunkleren Teil über Haar. Vor jeder Änderung analysiert pixelcut das Bild und sagt es in der Zeile `analysis:`: flaches 2D oder 3D-Fläche mit Schattierung, und die Tiefenebenen, also was vor dem Element liegt (ein Haarstrang über dem Herz bleibt vorne, beim Entfernen wie beim Einsetzen). Sitzt das Element auf einer gewölbten Fläche (Wange, Kugel, Falte), erkennt pixelcut das bei jedem Aufruf selbst, ohne Hinweis: aus der Helligkeit der Umgebung misst es Neigung und Wölbung und biegt die neue Form entsprechend (Stauchung zur abgewandten Seite, Randverzerrung). Auf ebener Fläche bleibt die Form flach. Die Ausgabe nennt das Ergebnis (`surface: flat` oder `surface: curved ...`); `--flat-surface` schaltet es ab. `--cut datei.png` speichert das entfernte Element mit den Original-Pixeln.
+Grenzen: Die Heilung füllt aus der Umgebung (glatt, kein Neuzeichnen von Mustern). Deckt das Element etwas Wichtiges ab, ist das Darunterliegende unbekannt und wird nur geschätzt.
+
+## Leitidee
+
+pixelcut ist ein KI-Werkzeug mit Harness, kein Bildeditor zum Selberklicken. Niemand soll stundenlang in Photoshop-Manier Ränder retuschieren und Schattierung nachbauen: Der Assistent nennt das Ziel, pixelcut misst am Original, entscheidet selbst und liefert ein Ergebnis, bei dem man keinen Unterschied merkt. Jede neue Funktion folgt dem: ein Befehl pro Aufgabe, gute Voreinstellungen statt Parameterlisten, eine Prüfzeile zum Schluss.
+
+## Mit KI-Assistenten bedienen
+
+pixelcut ist dafür gebaut, dass ein KI-Assistent (Claude, ChatGPT, Codex und andere) es steuert: ein Befehl pro Aufgabe, klare Fehlerzeilen, Ergebnisse als Dateien. Sag zum Beispiel:
+
+> „Nimm das Herz auf der Wange aus dem Bild und setz ein Karo mit Schatten hin.“
+> „Schneide das Foto in sechs Zickzack-Keile und füge sie wieder zusammen, dann prüfe, dass es identisch ist.“
+> „Mach aus allen Bildern in diesem Ordner transparente PNGs.“
+
+Der Assistent wählt den Befehl (`swap`, `split` + `join` + `compare`, `batch alpha`), pixelcut führt ihn exakt aus. pixelcut selbst versteht keine Sätze, es ist die verlässliche Ausführung dahinter. Stundenlanges Retuschieren in Photoshop-Manier entfällt: der Assistent sagt, was er will, pixelcut erledigt Auswahl, Heilung, Schattierung und Schatten selbst.
+
+Das Werkzeug für Assistenten (Harness):
+
+- `pixelcut regions bild.png out` nummeriert die erkennbaren Elemente (`regions.png` mit Nummern, `regions.json` mit Punkt, Rahmen, Farbe). Der Assistent schaut das Bild an und nennt die Nummer, ohne Pixel zu raten; der Punkt der Region geht direkt an `swap --at`.
+- `pixelcut tools` gibt alle Befehle als Tool-Definition (JSON-Schema) aus, die jeder Agent so registrieren kann. Sie wird aus dem Parser erzeugt und bleibt damit immer aktuell.
+- `swap` misst am Original selbst, wie das Element schattiert ist, welche Kontur es hat und welchen Schatten es wirft, und gibt das dem Ersatz-Symbol; die Toleranz wählt es selbst. Am Ende steht eine Prüfzeile: wie viele Pixel sich geändert haben und dass der Rest identisch ist. Der Assistent muss keine Parameter mitliefern.
+
+---
+
 ## Messungen
 
 ### Foto-Test
@@ -238,7 +271,7 @@ pip install -e ".[test]"
 pytest -q
 ```
 
-221 Tests. Sie prüfen die gespeicherten Dateien: Rundlauf split + join ist exakt (Zeichnung, Foto, gerade und Zickzack), die Teile überlappen nicht, Polygone, Winkel, Mitte, Größe und dickster Punkt stimmen mit den Teilen überein, `compare`, `key` und `alpha` rechnen richtig, `join` verweigert fehlende oder falsch große Teile, `split` fasst fremde Dateien nicht an, und schlechte Eingaben ergeben eine klare Fehlerzeile. Eingebaute Fehler (Mutationen) werden gefangen.
+233 Tests. Sie prüfen die gespeicherten Dateien: Rundlauf split + join ist exakt (Zeichnung, Foto, gerade und Zickzack), die Teile überlappen nicht, Polygone, Winkel, Mitte, Größe und dickster Punkt stimmen mit den Teilen überein, `compare`, `key` und `alpha` rechnen richtig, `join` verweigert fehlende oder falsch große Teile, `split` fasst fremde Dateien nicht an, und schlechte Eingaben ergeben eine klare Fehlerzeile. Eingebaute Fehler (Mutationen) werden gefangen.
 
 ---
 
