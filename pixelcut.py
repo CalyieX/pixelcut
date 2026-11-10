@@ -32,7 +32,7 @@ import numpy as np
 from PIL import Image, ImageOps
 
 
-__version__ = "1.6.3"
+__version__ = "1.6.4"
 PART_NAME = re.compile(r"part_(0|[1-9]\d*)\.png")                  # exactly the names split writes: no leading zeros
 LOSSLESS = (".png", ".tif", ".tiff")
 
@@ -138,6 +138,18 @@ def refuse_inputs_in_workfolders(inputs, outdir):
         for wf in work:
             if rx == wf or wf in rx.parents:
                 sys.exit("error: %s lies in %s, a work folder of pixelcut - move the picture elsewhere" % (x, wf))
+
+
+def rmtree_force(folder):
+    """Delete a folder of ours even if a file in it is read-only (a read-only part from an earlier run blocks rmtree on Windows,
+    and this runs after the commit point, where a failure would leave the folder unusable)."""
+    for root, _, files in os.walk(folder):
+        for f in files:
+            try:
+                os.chmod(os.path.join(root, f), stat.S_IWRITE | stat.S_IREAD)
+            except OSError:
+                pass
+    shutil.rmtree(folder)
 
 
 def need_folder_of(path):
@@ -313,12 +325,16 @@ def fattest_point(mask):
 # ----------------------------------------------------------------------------- alpha
 def cmd_alpha(a):
     refuse_inputs([a.input], [a.output])
+    if Path(a.output).suffix.lower() not in (".png", ".tif", ".tiff"):
+        sys.exit("error: alpha must write .png or .tif - %s would lose or change the transparency, the result is only exact lossless" % (Path(a.output).suffix or "this format"))
     rgb = load_rgb(a.input)
     rgba = color_to_alpha(rgb)
     save_atomic(Image.fromarray(rgba, "RGBA"), a.output)
-    if a.verify:
-        err = np.abs(over_white([rgba]) - rgb.astype(np.float32)).max()
-        print("max deviation over white: %.2f / 255" % err)
+    if a.verify:                                              # measure the SAVED file, not the buffer in memory
+        with Image.open(a.output) as saved:
+            back = np.array(saved.convert("RGBA"))
+        err = np.abs(over_white([back]) - rgb.astype(np.float32)).max()
+        print("max deviation over white: %.2f / 255 (measured on the saved file)" % err)
 
 
 # ----------------------------------------------------------------------------- split
@@ -392,7 +408,7 @@ def read_label_map(path, w, h):
         im.load()
     except Exception as e:
         sys.exit("--from-labels: cannot read %s (%s)" % (path, (str(e).strip().splitlines() or [type(e).__name__])[0]))
-    if im.format in ("JPEG", "MPO", "WEBP"):
+    if im.format in ("JPEG", "MPO", "WEBP") or str(im.info.get("compression", "")).lower() in ("jpeg", "tiff_jpeg", "webp", "tiff_webp", "jpeg2000"):
         sys.exit("--from-labels: %s is lossy (%s) - its grey values are not the part numbers any more; save the map as PNG" % (path, im.format))
     if im.mode in ("RGB", "RGBA", "LA", "F", "CMYK", "YCbCr", "LAB", "HSV"):
         sys.exit("--from-labels needs a grey picture (one number per pixel), not a colour one - %s is %s" % (path, im.mode))
@@ -432,12 +448,6 @@ def cmd_split(a):
     grid = parse_grid(a.grid, w, h) if a.grid else None
     labelled = read_label_map(a.from_labels, w, h) if a.from_labels else None
     exact = bool(grid or labelled)                            # cells / label parts are exact by construction: no slit, no ink edge
-    if exact:
-        ignored = [f for f, v, d in (("--centre", a.centre, "auto"), ("--angles", a.angles, "45,135,225,315"), ("--gap", a.gap, 2.6),
-                                     ("--edge", a.edge, 3.2), ("--depth", a.depth, 9.0), ("--tooth", a.tooth, 18.0),
-                                     ("--only-inside", a.only_inside, False)) if v != d]
-        if ignored:
-            print("note: %s ignored with %s (the parts are cut exactly, without slit)" % (", ".join(ignored), "--grid" if grid else "--from-labels"), file=sys.stderr)
     nparts = grid[0] * grid[1] if grid else labelled[1] if labelled else None
     rgba = np.dstack([rgb, np.full(rgb.shape[:2], 255, np.uint8)]) if a.opaque else color_to_alpha(rgb)
     if rgba[:, :, 3].max() == 0:                              # no pixel has any alpha: there is literally nothing to cut
@@ -477,6 +487,12 @@ def cmd_split(a):
         sys.exit("--gap/--edge/--depth are in pixels; these values are far too large")
     if a.depth > 0 and a.tooth <= 0:
         sys.exit("--tooth must be greater than 0 (or use --depth 0 for straight lines)")
+    if exact:                                                 # said only after every option was accepted: no note and then an error
+        ignored = [f for f, v, d in (("--centre", a.centre, "auto"), ("--angles", a.angles, "45,135,225,315"), ("--gap", a.gap, 2.6),
+                                     ("--edge", a.edge, 3.2), ("--depth", a.depth, 9.0), ("--tooth", a.tooth, 18.0),
+                                     ("--only-inside", a.only_inside, False)) if v != d]
+        if ignored:
+            print("note: %s ignored with %s (the parts are cut exactly, without slit)" % (", ".join(ignored), "--grid" if grid else "--from-labels"), file=sys.stderr)
     region = None
     if a.only_inside:                                         # cut only inside the largest non-white blob, leave satellites whole
         m = (rgb.min(2) < 250).astype(np.uint8)
@@ -503,7 +519,7 @@ def cmd_split(a):
     if (out / DONE).is_dir():                                 # the swap had finished, only the clean-up was interrupted
         if foreign_entries(out / DONE):
             sys.exit("%s holds files pixelcut did not put there - check and remove it first" % (out / DONE))
-        shutil.rmtree(out / DONE)
+        rmtree_force(out / DONE)
     leftover = out / ".pixelcut_old"                          # an earlier run was interrupted while swapping: its old set is the only full copy
     if leftover.is_dir():
         strange = foreign_entries(leftover)
@@ -583,7 +599,7 @@ def cmd_split(a):
         shutil.rmtree(staging, ignore_errors=True)
         raise
     os.replace(backup, out / DONE)                            # commit point: from here on the new set is the truth
-    shutil.rmtree(out / DONE)
+    rmtree_force(out / DONE)
     shutil.rmtree(staging)
     print("wrote %d parts + parts.json to %s" % (len(angles), out))
     if a.verify:
@@ -687,9 +703,9 @@ def cmd_join(a):
     else:
         files = sorted(f for f in Path(a.parts).glob("part_*.png") if PART_NAME.fullmatch(f.name))
         numbers = sorted(int(f.stem.split("_")[1]) for f in files)
-        gaps = [k for k in range(numbers[-1] + 1) if k not in numbers] if numbers else []
-        if gaps:
-            sys.exit("part numbering has a gap (missing part_%d.png) - without parts.json every part is needed" % gaps[0])
+        gap = next((k for k, v in enumerate(numbers) if v != k), None)      # sorted and unique: the first number that is not its own index
+        if gap is not None:
+            sys.exit("part numbering has a gap (missing part_%d.png) - without parts.json every part is needed" % gap)
     if not files:
         sys.exit("no part_*.png in %s" % a.parts)
     shapes = set()
@@ -921,7 +937,7 @@ def build_parser(parser_class=argparse.ArgumentParser):
     s.add_argument("--only-inside", action="store_true", help="cut only the biggest blob, keep satellites (clouds, dots) whole")
     s.add_argument("--simplify", type=float, default=2.0, help="polygon simplification in px (for hit areas)")
     s.add_argument("--opaque", action="store_true", help="photos: keep every pixel opaque, no white-to-alpha")
-    s.add_argument("--verify", action="store_true")
+    s.add_argument("--verify", action="store_true", help="after writing, re-join the saved parts and print the max deviation")
     s.set_defaults(fn=cmd_split)
 
     s = sub.add_parser("labels", help="write a label map: one picture, every pixel = number of its part")
@@ -976,6 +992,10 @@ def main(argv=None):
     except BaseException as e:                                # includes pyo3 PanicException, which is not an Exception
         if os.environ.get("PIXELCUT_DEBUG"):
             raise
+        if isinstance(e, FileNotFoundError):
+            sys.exit("error: cannot find %s" % (e.filename or "a file"))
+        if isinstance(e, (FileExistsError, NotADirectoryError)):
+            sys.exit("error: %s is a file, not a folder (or the other way round) - choose another path" % (e.filename or "the path"))
         sys.exit("error: %s (set PIXELCUT_DEBUG=1 for the full trace)" % (str(e).strip().splitlines() or [type(e).__name__])[0])
 
 

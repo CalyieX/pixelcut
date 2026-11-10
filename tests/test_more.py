@@ -1055,3 +1055,71 @@ def test_fully_opaque_rgba_gives_no_transparency_note(tmp_path):
     Image.new("RGBA", (10, 10), (255, 0, 0, 100)).save(tmp_path / "see.png")
     assert "transparency" not in cli("alpha", tmp_path / "solid.png", tmp_path / "a.png").stderr
     assert "transparency" in cli("alpha", tmp_path / "see.png", tmp_path / "b.png").stderr
+
+
+def test_alpha_refuses_lossy_output(tmp_path):
+    Image.fromarray((np.random.RandomState(5).rand(20, 30, 3) * 255).astype("uint8")).save(tmp_path / "o.png")
+    for bad in ("a.webp", "a.gif", "a.bmp", "a.jpg", "a"):
+        r = cli("alpha", tmp_path / "o.png", tmp_path / bad, check=False)
+        assert r.returncode != 0 and "alpha must write" in r.stderr, bad
+        assert not (tmp_path / bad).exists()
+    cli("alpha", tmp_path / "o.png", tmp_path / "ok.tif")
+
+
+def test_read_only_old_part_does_not_block_the_next_split(tmp_path):
+    import stat
+    Image.fromarray((np.random.RandomState(6).rand(20, 30, 3) * 255).astype("uint8")).save(tmp_path / "o.png")
+    cli("split", tmp_path / "o.png", tmp_path / "ro", "--grid", "2x1", "--opaque")
+    os.chmod(tmp_path / "ro" / "part_0.png", stat.S_IREAD)
+    try:
+        cli("split", tmp_path / "o.png", tmp_path / "ro", "--grid", "2x1", "--opaque")
+    finally:
+        for f in (tmp_path / "ro").glob("part_*.png"):
+            os.chmod(f, stat.S_IWRITE | stat.S_IREAD)
+    assert not (tmp_path / "ro" / ".pixelcut_done").exists() and not (tmp_path / "ro" / ".pixelcut_new").exists()
+    cli("join", tmp_path / "ro", tmp_path / "j.png")
+
+
+def test_ignored_note_not_followed_by_an_error_and_missing_input_is_clean(tmp_path):
+    Image.new("RGB", (40, 40), "red").save(tmp_path / "o.png")
+    r = cli("split", tmp_path / "o.png", tmp_path / "g", "--grid", "2x2", "--gap", "-1", check=False)
+    assert r.returncode != 0 and "ignored" not in r.stderr
+    r = cli("split", tmp_path / "missing.png", tmp_path / "g2", "--grid", "2x2", check=False)
+    assert r.returncode != 0 and "cannot find" in r.stderr and "Errno" not in r.stderr
+
+
+def test_browser_page_matches_cli_rules():
+    html = (Path(__file__).resolve().parent.parent / "docs" / "index.html").read_text(encoding="utf-8")
+    assert r"part_(0|[1-9]\d*)\.png" in html                      # same names as split writes
+    assert "numeric: true" in html and "re.split" in html         # part_2 before part_10
+
+
+def test_jpeg_compressed_tiff_label_map_is_refused(tmp_path):
+    rng = np.random.RandomState(8)
+    Image.new("RGB", (64, 64), "red").save(tmp_path / "o.png")
+    Image.fromarray(((rng.rand(64, 64) > .5) * 255).astype("uint8")).save(tmp_path / "m.tif", compression="jpeg")
+    r = cli("split", tmp_path / "o.png", tmp_path / "x", "--from-labels", tmp_path / "m.tif", check=False)
+    assert r.returncode != 0 and "lossy" in r.stderr and not (tmp_path / "x").exists()
+
+
+def test_join_gap_check_is_cheap_for_huge_numbers(tmp_path):
+    import tracemalloc
+    d = tmp_path / "p"
+    d.mkdir()
+    Image.new("RGB", (1, 1), "red").save(d / "part_0.png")
+    Image.new("RGB", (1, 1), "red").save(d / "part_1000000.png")
+    r = cli("join", d, tmp_path / "j.png", check=False)
+    assert r.returncode != 0 and "missing part_1.png" in r.stderr
+    import pixelcut
+    tracemalloc.start()
+    with pytest.raises(pixelcut.PixelcutError, match="gap"):
+        pixelcut.join(d, tmp_path / "j2.png")
+    peak = tracemalloc.get_traced_memory()[1]
+    tracemalloc.stop()
+    assert peak < 5_000_000, peak
+
+
+def test_alpha_verify_measures_the_saved_file(tmp_path):
+    Image.fromarray((np.random.RandomState(2).rand(20, 30, 3) * 255).astype("uint8")).save(tmp_path / "o.png")
+    r = cli("alpha", tmp_path / "o.png", tmp_path / "a.png", "--verify")
+    assert "saved file" in r.stdout and float(r.stdout.split("white:")[1].split("/")[0]) < 1

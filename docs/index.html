@@ -89,7 +89,7 @@ async function boot() {
     py.FS.mkdirTree("/work");
     py.FS.writeFile("/work/pixelcut.py", src);
     await py.runPythonAsync(`
-import sys, io, os, json, zipfile, contextlib, importlib
+import sys, io, os, re, json, zipfile, contextlib, importlib
 sys.path.insert(0, "/work")
 import pixelcut
 def run(argv):
@@ -106,7 +106,7 @@ def run(argv):
         return 1, buf.getvalue() + "error: %s" % e
 def zip_dir(folder, target):
     with zipfile.ZipFile(target, "w", zipfile.ZIP_STORED) as z:
-        for n in sorted(os.listdir(folder)):
+        for n in sorted(os.listdir(folder), key=lambda s: [int(t) if t.isdigit() else t for t in re.split(r"(\d+)", s)]):
             if n.startswith("."): continue
             z.write(os.path.join(folder, n), n)
 `);
@@ -149,7 +149,7 @@ async function go() {
   if (!files.length) { status("Choose a picture first.", "bad"); return; }
   if (cmd === "join") {
     const names = files.map((f) => f.name);
-    const bad = names.filter((n) => !/^part_\d+\.png$/.test(n) && n !== "parts.json");
+    const bad = names.filter((n) => !/^part_(0|[1-9]\d*)\.png$/.test(n) && n !== "parts.json");
     if (bad.length) { status("These files are not parts: " + bad.join(", ") + "\nChoose the files part_0.png, part_1.png, … and parts.json that the split gave you (the exact file names are needed).", "bad"); return; }
     if (new Set(names).size !== names.length) { status("Some file names appear twice - choose each part once.", "bad"); return; }
   } else {
@@ -180,9 +180,10 @@ async function go() {
       py.FS.writeFile(inp, new Uint8Array(await f.arrayBuffer()));
       if (cmd === "alpha") argv = ["alpha", inp, "/work/out/transparent.png"];
       else {
-        argv = ["split", inp, "/work/out/parts", "--angles=" + $("angles").value.trim(),
-                ...($("grid").value.trim() ? ["--grid=" + $("grid").value.trim().replace(/\s+/g, "")] : []),
-                "--depth", $("depth").value, "--tooth", $("tooth").value, "--gap", $("gap").value, "--edge", $("edge").value];
+        const g = $("grid").value.trim();
+        argv = ["split", inp, "/work/out/parts"].concat(g
+          ? ["--grid=" + g.replace(/\s+/g, "")]                       // a grid is cut exactly: the wedge options would only be ignored
+          : ["--angles=" + $("angles").value.trim(), "--depth", $("depth").value, "--tooth", $("tooth").value, "--gap", $("gap").value, "--edge", $("edge").value]);
         if ($("opaque").checked) argv.push("--opaque");
       }
     }
@@ -192,7 +193,7 @@ async function go() {
     status(text, "ok");
     const R = $("results"); R.hidden = false;
     if (cmd === "split") {
-      const names = py.FS.readdir("/work/out/parts").filter((n) => n.endsWith(".png")).sort();
+      const names = py.FS.readdir("/work/out/parts").filter((n) => n.endsWith(".png")).sort((x, y) => x.localeCompare(y, undefined, {numeric: true}));
       for (const n of names) addImage(n, py.FS.readFile("/work/out/parts/" + n), "image/png");
       py.runPython(`zip_dir("/work/out/parts", "/work/out/parts.zip")`);
       addDownload("pixelcut-parts.zip", py.FS.readFile("/work/out/parts.zip"), "application/zip");
