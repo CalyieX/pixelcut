@@ -32,7 +32,7 @@ import numpy as np
 from PIL import Image, ImageOps
 
 
-__version__ = "1.6.7"
+__version__ = "1.6.8"
 PART_NAME = re.compile(r"part_(0|[1-9]\d*)\.png")                  # exactly the names split writes: no leading zeros
 LOSSLESS = (".png", ".tif", ".tiff")
 
@@ -103,12 +103,23 @@ def lock_folder(folder, held):
     """One pixelcut run at a time may change the files of a folder. The lock lives as long as the process holds the open file, so
     a crashed run never leaves a stale lock behind. Returns True if the lock is held; False where locking does not work (then
     nothing can be told about other runs). Another live run: exit with a clear message. `held` collects the handle to close."""
-    f = open(Path(folder) / ".pixelcut_lock", "a+b")
+    path = Path(folder) / ".pixelcut_lock"
+    try:
+        f = open(path, "a+b")
+    except OSError:                                           # a lock file we cannot open (read-only folder/file): work without it, and say so
+        print("note: cannot create the lock file %s - two runs at once in this folder would not be noticed" % path, file=sys.stderr)
+        return False
     held.append(f)
     f.seek(0, 2)
     if f.tell() == 0:
         f.write(b"1")
         f.flush()
+        if os.name == "nt":                                   # not a file the person should see or delete by accident
+            try:
+                import ctypes
+                ctypes.windll.kernel32.SetFileAttributesW(str(path), 0x2)
+            except Exception:
+                pass
     state = _lock(f)
     if state == "busy":
         sys.exit("error: another pixelcut run is working in %s right now - wait until it has finished" % folder)
@@ -184,7 +195,11 @@ def recover_publish(folder, locked=True):
     folder = Path(folder).resolve()
     for d in sorted(folder.glob(".pixelcut_*")):
         meta = d / "publish.json"
-        if link_like(d) or not d.is_dir() or not meta.is_file():
+        if link_like(d) or not d.is_dir():
+            continue
+        if not meta.is_file():
+            if locked and [f.name for f in d.iterdir()] == ["publish.json.tmp"]:     # died while writing its note: nothing in here to restore
+                shutil.rmtree(d, ignore_errors=True)
             continue
         if not locked:
             print("note: %s may be the backup of an interrupted run, but this system cannot tell whether it is still running - left untouched" % d, file=sys.stderr)
@@ -662,7 +677,12 @@ def _cmd_split(a, held):
             sector[cc] = np.bincount(sector[cc].ravel()).argmax()
     out = Path(a.outdir)
     out.mkdir(parents=True, exist_ok=True)
-    lock_folder(out, held)                                    # recovery below must never meet a live run of ours
+    locked = lock_folder(out, held)                           # recovery below must never meet a live run of ours
+    if not locked:                                            # no working lock: we cannot tell a dead run from a live one - touch nothing of theirs
+        for left in (".pixelcut_old", ".pixelcut_new", DONE):
+            if (out / left).exists():
+                sys.exit("error: %s exists - it may belong to a run that is still working, and this system cannot check that. "
+                         "Make sure no other pixelcut is running in %s, then delete that folder" % (out / left, out))
     for scratch in (DONE, ".pixelcut_old", ".pixelcut_new"):
         real_folder(out / scratch, "scratch folder")
     if (out / DONE).is_dir():                                 # the swap had finished, only the clean-up was interrupted
@@ -835,6 +855,17 @@ def cmd_join(a):
     """Put parts back together (over white or a colour) - the way to 'rebuild' a picture from its exact pieces."""
     if not Path(a.parts).is_dir():
         sys.exit("error: %s is not a folder of parts (does not exist, or is a file)" % a.parts)
+    for work in (".pixelcut_old", ".pixelcut_new", DONE):     # a split is running here or died in the middle: the set is not complete
+        if (Path(a.parts) / work).exists():
+            sys.exit("error: %s is being written (or a split was interrupted) - run split again, or wait until it has finished" % a.parts)
+    lock_path = Path(a.parts) / ".pixelcut_lock"
+    if lock_path.is_file():
+        try:
+            with open(lock_path, "rb") as probe:
+                if _lock(probe) == "busy":
+                    sys.exit("error: a pixelcut run is writing in %s right now - wait until it has finished" % a.parts)
+        except OSError:
+            pass
     manifest = Path(a.parts) / "parts.json"
     size = None
     if manifest.exists():                                     # the manifest says which parts belong together - all of them are needed
@@ -1183,6 +1214,14 @@ def _flags(opts):
     return argv
 
 
+def _warn_about(err):
+    """Notes the command line prints that a program using the API must not miss (a backup left behind, a lock that did not work)."""
+    import warnings
+    for ln in err.getvalue().splitlines():
+        if ln.startswith("note:") and any(w in ln for w in ("left untouched", "still holds", "cannot tell", "cannot create the lock", "kept")):
+            warnings.warn(ln[5:].strip(), UserWarning, stacklevel=3)
+
+
 def _run(cmd, positional, opts):
     import contextlib
     import io
@@ -1197,6 +1236,7 @@ def _run(cmd, positional, opts):
             a.fn(a)
     except SystemExit as e:
         if e.code in (None, 0):
+            _warn_about(err)
             return out.getvalue()
         raise PixelcutError(hint(str(e.code).removeprefix("error: "))) from None
     except (KeyboardInterrupt, PixelcutError):
@@ -1205,6 +1245,7 @@ def _run(cmd, positional, opts):
         if isinstance(e, OSError) and oserror_message(e):
             raise PixelcutError(hint(oserror_message(e).removeprefix("error: "))) from e
         raise PixelcutError(hint((str(e).strip().splitlines() or [type(e).__name__])[0])) from e
+    _warn_about(err)
     return out.getvalue()
 
 

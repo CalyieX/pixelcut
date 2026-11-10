@@ -1339,3 +1339,57 @@ def test_jpeg_output_flattens_transparency_and_unknown_endings_are_plain(tmp_pat
     assert r.returncode != 0 and "not a folder of parts" in r.stderr
     r = cli("split", tmp_path / "t.png", tmp_path / "x", "--from-labels", tmp_path / "nothere.png", check=False)
     assert r.returncode != 0 and "does not exist" in r.stderr and "Errno" not in r.stderr
+
+
+def test_split_without_a_working_lock_leaves_a_foreign_backup_alone(tmp_path, monkeypatch):
+    import pixelcut
+    Image.new("RGB", (30, 30), "red").save(tmp_path / "o.png")
+    out = tmp_path / "o_parts"
+    pixelcut.split(tmp_path / "o.png", out, grid="2x1", opaque=True)
+    old = out / ".pixelcut_old"
+    old.mkdir()
+    (old / "part_0.png").write_bytes(b"A LIVE RUN'S OLD COPY")
+    monkeypatch.setattr(pixelcut, "_lock", lambda f: "unavailable")
+    with pytest.raises(pixelcut.PixelcutError, match="cannot check"):
+        pixelcut.split(tmp_path / "o.png", out, grid="2x1", opaque=True)
+    assert (old / "part_0.png").read_bytes() == b"A LIVE RUN'S OLD COPY"
+
+
+def test_join_refuses_a_folder_that_is_being_written_or_was_interrupted(tmp_path):
+    import pixelcut
+    Image.new("RGB", (30, 30), "red").save(tmp_path / "o.png")
+    out = tmp_path / "o_parts"
+    cli("split", tmp_path / "o.png", out, "--grid", "2x1", "--opaque")
+    (out / "parts.json").unlink()                                   # as if a split were still installing
+    (out / ".pixelcut_old").mkdir()
+    r = cli("join", out, tmp_path / "j.png", check=False)
+    assert r.returncode != 0 and "being written" in r.stderr and not (tmp_path / "j.png").exists()
+    (out / ".pixelcut_old").rmdir()
+    held = []
+    import pixelcut as px
+    assert px.lock_folder(out, held) is True
+    try:
+        r = cli("join", out, tmp_path / "j.png", check=False)
+        assert r.returncode != 0 and "writing in" in r.stderr
+    finally:
+        for f in held:
+            f.close()
+    cli("join", out, tmp_path / "j.png")
+
+
+def test_api_turns_backup_notes_into_warnings():
+    import io
+    import pixelcut
+    err = io.StringIO("note: X still holds backups that belong to no file in the list - kept\nnote: harmless\n")
+    with pytest.warns(UserWarning, match="still holds backups") as got:
+        pixelcut._warn_about(err)
+    assert len(got) == 1
+
+
+def test_aside_with_only_a_half_written_note_is_removed(tmp_path):
+    import pixelcut
+    d = tmp_path / ".pixelcut_died"
+    d.mkdir()
+    (d / "publish.json.tmp").write_text("{")
+    pixelcut.recover_publish(tmp_path)
+    assert not d.exists()
