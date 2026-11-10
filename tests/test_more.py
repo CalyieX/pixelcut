@@ -1462,3 +1462,25 @@ def test_api_warns_when_the_file_system_cannot_lock(tmp_path, monkeypatch):
     monkeypatch.setattr(pixelcut, "_lock", lambda f: "unavailable")
     with pytest.warns(UserWarning, match="cannot lock folders"):
         pixelcut.split(_mk(tmp_path), tmp_path / "p", grid="2x2", opaque=True)
+
+
+def test_join_without_lock_notices_a_swap_that_was_rolled_back(tmp_path, monkeypatch):
+    """Same names, sizes and times after a rollback: only the content shows that the parts were swapped while join read."""
+    import pixelcut
+    monkeypatch.setattr(pixelcut, "_lock", lambda f: "unavailable")
+    out = tmp_path / "p"
+    pixelcut.split(_mk(tmp_path), out, grid="2x2", opaque=True)
+    keep = (out / "part_1.png").read_bytes()
+    real = pixelcut.over_white
+    def swapping(it):
+        for k, im in enumerate(it):
+            if k == 2:
+                st = (out / "part_1.png").stat()
+                (out / "part_1.png").write_bytes(b"x" * len(keep))        # "new" content ...
+                (out / "part_1.png").write_bytes(keep)                    # ... rolled back: identical bytes again
+                (out / "part_0.png").write_bytes((out / "part_0.png").read_bytes()[:-1] + b"\0")
+                os.utime(out / "part_0.png", ns=(st.st_atime_ns, st.st_mtime_ns))
+            yield im
+    monkeypatch.setattr(pixelcut, "over_white", lambda it: real(swapping(it)))
+    with pytest.raises(pixelcut.PixelcutError, match="changed while"):
+        pixelcut.join(out, tmp_path / "j.png")

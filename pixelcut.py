@@ -32,7 +32,7 @@ import numpy as np
 from PIL import Image, ImageOps
 
 
-__version__ = "1.6.10"
+__version__ = "1.6.11"
 PART_NAME = re.compile(r"part_(0|[1-9]\d*)\.png")                  # exactly the names split writes: no leading zeros
 LOSSLESS = (".png", ".tif", ".tiff")
 
@@ -896,8 +896,9 @@ def _cmd_join(a, held):
     for work in (".pixelcut_old", ".pixelcut_new", DONE):     # a split is running here or died in the middle: the set is not complete
         if (Path(a.parts) / work).exists():
             sys.exit("error: %s is being written (or a split was interrupted) - run split again, or wait until it has finished" % a.parts)
-    lock_folder(a.parts, held, quiet=True,                    # a split that starts while we read must wait: no mixed set, even if it rolls back
-                busy="error: a pixelcut run is writing in %s right now - try again when it has finished" % a.parts)
+    if (Path(a.parts) / ".pixelcut_lock").exists():           # parts made by pixelcut have a lock; a hand-made folder gets none from a read
+        lock_folder(a.parts, held, quiet=True,                    # a split that starts while we read must wait: no mixed set, even if it rolls back
+                    busy="error: a pixelcut run is writing in %s right now - try again when it has finished" % a.parts)
     for work in (".pixelcut_old", ".pixelcut_new", DONE):     # looked at again under the lock: a split may have started in between
         if (Path(a.parts) / work).exists():
             sys.exit("error: %s is being written (or a split was interrupted) - run split again, or wait until it has finished" % a.parts)
@@ -934,12 +935,14 @@ def _cmd_join(a, held):
     refuse_inputs(files + [Path(a.parts) / "parts.json"], [a.output])
     if Path(a.output).suffix.lower() not in LOSSLESS + (".bmp",):
         sys.exit("error: join must write a lossless picture (.png, .tif or .bmp) - %s would change pixels, the rebuild is only exact lossless" % (Path(a.output).suffix or "this format"))
-    def stamp():                                              # what the files looked like: a split that swaps them while we read changes this
-        return [(f.name, f.stat().st_size, f.stat().st_mtime_ns, getattr(f.stat(), "st_ino", 0)) for f in files]
-    before = stamp()
-    out = over_white(np.array(Image.open(f).convert("RGBA")) for f in files)
-    try:
-        after = stamp()
+    import hashlib, io
+    def digest(f):
+        return hashlib.sha256(Path(f).read_bytes()).hexdigest()
+    data = [f.read_bytes() for f in files]                    # every part is read once, into memory
+    before = [hashlib.sha256(d).hexdigest() for d in data]
+    out = over_white(np.array(Image.open(io.BytesIO(d)).convert("RGBA")) for d in data)
+    try:                                                      # what is on disk now must be exactly what we used: a split that swapped parts and
+        after = [digest(f) for f in files]                    # rolled back leaves the same names, sizes and times, only the content tells
     except OSError:
         after = None
     if after != before or any((Path(a.parts) / w).exists() for w in (".pixelcut_old", ".pixelcut_new", DONE)):
