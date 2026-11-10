@@ -32,7 +32,7 @@ import numpy as np
 from PIL import Image, ImageOps
 
 
-__version__ = "1.6.14"
+__version__ = "1.6.15"
 PART_NAME = re.compile(r"part_(0|[1-9]\d*)\.png")                  # exactly the names split writes: no leading zeros
 LOSSLESS = (".png", ".tif", ".tiff")
 
@@ -316,6 +316,12 @@ def oserror_message(e):
     return None
 
 
+def flatten_white(img):
+    flat = Image.new("RGB", img.size, "white")
+    flat.paste(img.convert("RGBA"), mask=img.convert("RGBA").getchannel("A"))
+    return flat
+
+
 def save_atomic(img, path):
     """Write beside the target, replace only when complete: an abort never leaves half a picture in place of a good one."""
     need_folder_of(path)
@@ -323,11 +329,9 @@ def save_atomic(img, path):
     Image.init()
     if Image.registered_extensions().get(ext) not in Image.SAVE:
         sys.exit("error: cannot write %s - use .png, .tif, .jpg, .webp or .bmp" % (ext or "a file without an ending"))
-    if ext in (".jpg", ".jpeg") and img.mode in ("RGBA", "LA", "PA"):         # JPEG has no transparency: flatten over white, say so
+    if ext in (".jpg", ".jpeg", ".bmp") and img.mode in ("RGBA", "LA", "PA"):  # these have no (usable) transparency: flatten over white, say so
         print("note: %s cannot hold transparency - flattened over white" % path, file=sys.stderr)
-        flat = Image.new("RGB", img.size, "white")
-        flat.paste(img.convert("RGBA"), mask=img.convert("RGBA").getchannel("A"))
-        img = flat
+        img = flatten_white(img)
     d, tmp = scratch_beside(path)
     try:
         img.save(tmp)
@@ -378,7 +382,7 @@ def decoded_8bit(path):
     they get exactly these pixels instead of reading the original a second time with their own, different decoder."""
     need_picture(path)
     with Image.open(path) as probe:
-        has_alpha = "A" in probe.getbands() or "transparency" in probe.info
+        has_alpha = ("A" in probe.getbands() or "transparency" in probe.info) and probe.mode not in ("I;16", "I;16L", "I;16B", "I", "F")
     if not has_alpha:
         return Image.fromarray(load_rgb(path))
     pic = open_upright(path)
@@ -967,7 +971,12 @@ def _cmd_join(a, held):
         return hashlib.sha256(Path(f).read_bytes()).hexdigest()
     data = [f.read_bytes() for f in files]                    # every part is read once, into memory
     before = [hashlib.sha256(d).hexdigest() for d in data] + [hashlib.sha256(manifest_bytes).hexdigest() if manifest_bytes is not None else None]
-    out = over_white(np.array(Image.open(io.BytesIO(d)).convert("RGBA")) for d in data)
+    def decode_part(d):
+        im = Image.open(io.BytesIO(d))
+        if im.mode in ("I;16", "I;16L", "I;16B", "I", "F"):
+            sys.exit("error: join works on 8-bit parts (as split writes them) - %s-bit grey parts would be cut off" % "16")
+        return np.array(im.convert("RGBA"))
+    out = over_white(decode_part(d) for d in data)
     try:                                                      # what is on disk now must be exactly what we used: a split that swapped parts and
         after = [digest(f) for f in files] + [digest(manifest) if manifest_bytes is not None and manifest.exists() else None]   # (rolled back: same names, sizes, times)
     except OSError:
@@ -1130,10 +1139,17 @@ def ensure_esrgan():
     return str(exe) if exe else None
 
 
+def check_upscaled_size(im, scale):
+    if im.width * im.height * scale * scale > 600_000_000:
+        sys.exit("error: the result would be %d x %d = %d MP (limit 600 MP) - use a smaller --scale or a smaller picture"
+                 % (im.width * scale, im.height * scale, im.width * im.height * scale * scale // 1_000_000))
+
+
 def lanczos_upscale(a, why):
     """Fallback without AI: plain Lanczos resize. Smooth, but no invented detail."""
-    print("Real-ESRGAN not usable here (%s) - using plain Lanczos resize instead (no AI detail)." % why)
     im = decoded_8bit(a.input)                                # the same pixels every other command works on (16 bit, EXIF, CMYK ...)
+    check_upscaled_size(im, a.scale)
+    print("Real-ESRGAN not usable here (%s) - using plain Lanczos resize instead (no AI detail)." % why)
     save_atomic(im.resize((im.width * a.scale, im.height * a.scale), Image.LANCZOS), a.output)
     print("wrote", a.output)
 
@@ -1159,11 +1175,20 @@ def cmd_upscale(a):
         tmp = work / "engine.png"                             # other endings (.tif, .bmp): engine -> png, then converted
     try:
         src = work / "input.png"                              # the engine ignores EXIF and 16 bit: it gets the pixels we decoded
-        decoded_8bit(a.input).save(src)
-        subprocess.run([exe, "-i", str(src), "-o", str(tmp), "-n", a.model, "-s", str(a.scale)],
+        pic = decoded_8bit(a.input)
+        check_upscaled_size(pic, a.scale)
+        if pic.mode == "RGBA" and target.suffix.lower() in (".jpg", ".jpeg", ".bmp"):
+            print("note: %s cannot hold transparency - flattened over white" % a.output, file=sys.stderr)
+            pic = flatten_white(pic)
+        pic.save(src)
+        subprocess.run([exe, "-i", str(src), "-o", str(tmp), "-n", a.model, "-s", "4"],      # the models are 4x models: other factors give a wrong picture
                        check=True, cwd=str(Path(exe).parent), capture_output=True, timeout=1800)
         if not tmp.is_file() or tmp.stat().st_size == 0:
             raise OSError("the engine produced no picture")
+        if a.scale != 4:                                      # the wanted factor: resize the 4x result
+            with Image.open(tmp) as made:
+                made = made.resize((pic.width * a.scale, pic.height * a.scale), Image.LANCZOS)
+            made.save(tmp)
         if engine_ok:
             os.replace(tmp, target)
         else:

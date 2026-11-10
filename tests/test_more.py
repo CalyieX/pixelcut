@@ -1580,3 +1580,55 @@ def test_join_accepts_a_hand_made_manifest_without_centre_and_angles(tmp_path):
     (out / "parts.json").write_text(json.dumps(m))
     pixelcut.join(out, tmp_path / "j.png")
     assert (tmp_path / "j.png").exists()
+
+
+def _fake_engine(tmp_path, monkeypatch, seen):
+    import subprocess
+    def fake_run(cmd, **kw):
+        seen["scale"] = cmd[cmd.index("-s") + 1]
+        src = Image.open(cmd[cmd.index("-i") + 1])
+        seen["mode"] = src.mode
+        Image.new(src.mode if src.mode in ("RGB", "RGBA") else "RGB", (src.width * 4, src.height * 4), (1, 2, 3)).save(cmd[cmd.index("-o") + 1])
+    monkeypatch.setattr(subprocess, "run", fake_run)
+    exe = tmp_path / "engine.exe"
+    exe.write_bytes(b"")
+    return str(exe)
+
+
+def test_upscale_runs_the_engine_at_its_native_4x_and_resizes_to_the_wanted_factor(tmp_path, monkeypatch):
+    import pixelcut
+    Image.new("RGB", (30, 20), (9, 9, 9)).save(tmp_path / "a.png")
+    seen = {}
+    exe = _fake_engine(tmp_path, monkeypatch, seen)
+    pixelcut.upscale(tmp_path / "a.png", tmp_path / "u.png", scale=2, bin=exe)
+    assert seen["scale"] == "4" and Image.open(tmp_path / "u.png").size == (60, 40)
+    pixelcut.upscale(tmp_path / "a.png", tmp_path / "u8.png", scale=8, bin=exe)
+    assert Image.open(tmp_path / "u8.png").size == (240, 160)
+
+
+def test_upscale_to_a_format_without_transparency_flattens_over_white(tmp_path, monkeypatch):
+    import pixelcut
+    Image.new("RGBA", (10, 10), (0, 0, 0, 0)).save(tmp_path / "t.png")
+    seen = {}
+    exe = _fake_engine(tmp_path, monkeypatch, seen)
+    for ending in (".jpg", ".bmp"):
+        pixelcut.upscale(tmp_path / "t.png", tmp_path / ("u" + ending), scale=4, bin=exe)
+        assert seen["mode"] == "RGB"                                # the engine got white, not a transparent picture it cannot write as JPG
+    pixelcut.upscale(tmp_path / "t.png", tmp_path / "l.bmp", scale=2, no_ai=True)
+    assert Image.open(tmp_path / "l.bmp").convert("RGB").getpixel((0, 0)) == (255, 255, 255)
+
+
+def test_16_bit_grey_with_a_colour_key_goes_the_same_way_as_without(tmp_path):
+    import pixelcut
+    g = (np.linspace(0, 65535, 32 * 32).reshape(32, 32)).astype("uint16")
+    Image.fromarray(g).save(tmp_path / "g.png", transparency=0)
+    a = np.array(pixelcut.decoded_8bit(tmp_path / "g.png"))
+    assert a.ndim == 3 and a[16, 16].mean() > 100 and a[16, 16].mean() < 160        # a ramp, not white
+
+
+def test_upscale_refuses_an_absurd_output_size_and_does_not_announce_a_fallback(tmp_path, capsys):
+    import pixelcut
+    Image.new("RGB", (6000, 5000), (1, 1, 1)).save(tmp_path / "big.png")
+    with pytest.raises(pixelcut.PixelcutError, match="limit 600 MP"):
+        pixelcut.upscale(tmp_path / "big.png", tmp_path / "o.png", scale=5, no_ai=True)
+    assert "Lanczos" not in capsys.readouterr().out
