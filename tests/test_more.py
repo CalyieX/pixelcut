@@ -1654,3 +1654,40 @@ def test_join_refuses_16_bit_png_parts(tmp_path):
         cv2.imwrite(str(out / ("part_%d.png" % k)), np.full((8, 8, 3), 30000, np.uint16))
     with pytest.raises(pixelcut.PixelcutError, match="16 bit"):
         pixelcut.join(out, tmp_path / "j.png")
+
+
+def test_upscale_leaves_pillows_global_limit_alone_and_falls_back_when_the_engine_picture_is_unreadable(tmp_path, monkeypatch):
+    import pixelcut, subprocess
+    Image.new("RGB", (30, 20), (9, 9, 9)).save(tmp_path / "a.png")
+    def broken(cmd, **kw):
+        Path(cmd[cmd.index("-o") + 1]).write_bytes(b"not a picture at all")
+    monkeypatch.setattr(subprocess, "run", broken)
+    exe = tmp_path / "engine.exe"
+    exe.write_bytes(b"")
+    before = Image.MAX_IMAGE_PIXELS
+    pixelcut.upscale(tmp_path / "a.png", tmp_path / "u.png", scale=2, bin=str(exe))
+    assert Image.MAX_IMAGE_PIXELS == before
+    monkeypatch.setattr(Image, "MAX_IMAGE_PIXELS", None)
+    assert Image.open(tmp_path / "u.png").size == (60, 40)          # plain Lanczos result
+
+
+def test_upscale_with_a_huge_intermediate_goes_to_lanczos_instead_of_the_engine(tmp_path, monkeypatch):
+    import pixelcut, subprocess
+    Image.new("RGB", (5100, 5000), (9, 9, 9)).save(tmp_path / "big.png")        # 25.5 MP x 16 = 408 MP
+    called = []
+    monkeypatch.setattr(subprocess, "run", lambda *a, **k: called.append(1))
+    exe = tmp_path / "engine.exe"
+    exe.write_bytes(b"")
+    pixelcut.upscale(tmp_path / "big.png", tmp_path / "u.png", scale=2, bin=str(exe))
+    assert not called
+
+
+def test_join_refuses_16_bit_tiff_parts(tmp_path):
+    import pixelcut, cv2
+    out = tmp_path / "p"
+    out.mkdir()
+    for k in range(2):
+        cv2.imwrite(str(tmp_path / "x.tif"), np.full((8, 8, 3), 30000, np.uint16))
+        (out / ("part_%d.png" % k)).write_bytes((tmp_path / "x.tif").read_bytes())      # a TIFF under a part name
+    with pytest.raises(pixelcut.PixelcutError, match="8 bit"):
+        pixelcut.join(out, tmp_path / "j.png")

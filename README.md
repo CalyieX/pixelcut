@@ -157,6 +157,8 @@ python pixelcut.py trace bild.png bild.svg --render bild_trace.png    # vtracer
 python pixelcut.py upscale bild.png gross.png    # holt Real-ESRGAN beim ersten Mal selbst
 ```
 
+Grenzen von `upscale`: Eingabe höchstens 150 MP, Ergebnis höchstens 600 MP, `--scale` 1 bis 8. Die KI rechnet immer in 4-facher Größe und wird danach auf den gewünschten Faktor gebracht; bei anderen Faktoren als 4 liegt das 4-fache Zwischenbild einmal im Speicher (etwa 0,11 GB je Megapixel Eingabe, ein 12-MP-Foto braucht rund 1,8 GB). Wird es zu groß, nimmt das Tool Lanczos und sagt es. `join` arbeitet nur mit 8-Bit-Teilen, wie `split` sie schreibt.
+
 Zwei Fremdverfahren, damit man selbst messen kann, wie weit sie vom Original abweichen. Beide **ändern Pixel** und sind nicht mehr exakt.
 
 ---

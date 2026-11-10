@@ -32,7 +32,7 @@ import numpy as np
 from PIL import Image, ImageOps
 
 
-__version__ = "1.6.16"
+__version__ = "1.6.17"
 PART_NAME = re.compile(r"part_(0|[1-9]\d*)\.png")                  # exactly the names split writes: no leading zeros
 LOSSLESS = (".png", ".tif", ".tiff")
 
@@ -975,6 +975,8 @@ def _cmd_join(a, held):
         if d[:4] == bytes([0x89, 0x50, 0x4E, 0x47]) and len(d) > 24 and d[24] == 16:
             sys.exit("error: join works on 8-bit parts (as split writes them) - this part is 16 bit per channel and would be cut off")
         im = Image.open(io.BytesIO(d))
+        if any(v > 8 for v in (getattr(im, "tag_v2", None) or {}).get(258, ())):             # TIFF: BitsPerSample
+            sys.exit("error: join works on 8-bit parts (as split writes them) - this part is more than 8 bit per channel and would be cut off")
         if im.mode in ("I;16", "I;16L", "I;16B", "I", "F"):
             sys.exit("error: join works on 8-bit parts (as split writes them) - %s-bit grey parts would be cut off" % "16")
         return np.array(im.convert("RGBA"))
@@ -1141,20 +1143,17 @@ def ensure_esrgan():
     return str(exe) if exe else None
 
 
-def engine_result(path):
-    """Open the picture the engine made. It is 16 times the input - far over Pillow's bomb limit for a normal 12 MP photo - and it is
-    our own scratch file, so the limit is lifted here only; check_upscaled_size has already capped the real result."""
-    class Opened:
-        def __enter__(self):
-            self.old = Image.MAX_IMAGE_PIXELS
-            Image.MAX_IMAGE_PIXELS = None
-            self.im = Image.open(path)
-            self.im.load()
-            return self.im
-        def __exit__(self, *exc):
-            Image.MAX_IMAGE_PIXELS = self.old
-            self.im.close()
-    return Opened()
+class BadEngineResult(Exception):
+    pass
+
+
+def read_engine_result(path):
+    """The picture the engine made, as a BGR(A) array. It is 16 times the input, far over Pillow's bomb limit for a normal photo - and
+    our own scratch file - so it is read with OpenCV: nothing global is switched off, nothing has to be put back."""
+    arr = cv2.imdecode(np.fromfile(str(path), np.uint8), cv2.IMREAD_UNCHANGED)
+    if arr is None or arr.dtype != np.uint8 or arr.ndim != 3 or arr.shape[2] not in (3, 4):
+        raise BadEngineResult("the engine's picture could not be read")
+    return arr
 
 
 def check_upscaled_size(im, scale):
@@ -1198,20 +1197,31 @@ def cmd_upscale(a):
         if pic.mode == "RGBA" and target.suffix.lower() in (".jpg", ".jpeg", ".bmp"):
             print("note: %s cannot hold transparency - flattened over white" % a.output, file=sys.stderr)
             pic = flatten_white(pic)
+        needs_decode = a.scale != 4 or not engine_ok          # then the 4x picture (16 x the input) is held in memory once
+        if needs_decode and pic.width * pic.height * 16 > 400_000_000:
+            return lanczos_upscale(a, "the AI picture at this factor would need too much memory (%d MP)" % (pic.width * pic.height * 16 // 1_000_000))
         pic.save(src)
         subprocess.run([exe, "-i", str(src), "-o", str(tmp), "-n", a.model, "-s", "4"],      # the models are 4x models: other factors give a wrong picture
                        check=True, cwd=str(Path(exe).parent), capture_output=True, timeout=1800)
         if not tmp.is_file() or tmp.stat().st_size == 0:
             raise OSError("the engine produced no picture")
-        if a.scale != 4:                                      # the wanted factor: resize the 4x result
-            with engine_result(tmp) as made:
-                made = made.resize((pic.width * a.scale, pic.height * a.scale), Image.LANCZOS)
-            made.save(tmp)
-        if engine_ok:
+        if not needs_decode:
             os.replace(tmp, target)
         else:
-            with engine_result(tmp) as made:
-                save_atomic(made.copy(), target)
+            arr = read_engine_result(tmp)
+            if a.scale != 4:                                  # the wanted factor: resize the 4x result
+                arr = cv2.resize(arr, (pic.width * a.scale, pic.height * a.scale), interpolation=cv2.INTER_AREA if a.scale < 4 else cv2.INTER_LANCZOS4)
+            made = Image.fromarray(np.ascontiguousarray(arr[:, :, [2, 1, 0] if arr.shape[2] == 3 else [2, 1, 0, 3]]))
+            del arr
+            if engine_ok:
+                made.save(tmp, **({"quality": 95} if target.suffix.lower() in (".jpg", ".jpeg") else {}))
+                os.replace(tmp, target)
+            else:
+                save_atomic(made, target)
+    except BadEngineResult as e:
+        return lanczos_upscale(a, str(e))
+    except MemoryError:
+        return lanczos_upscale(a, "not enough memory for the AI result")
     except subprocess.TimeoutExpired:
         return lanczos_upscale(a, "the engine did not finish in 30 minutes")
     except OSError as e:
