@@ -1516,3 +1516,37 @@ def test_join_notices_a_changed_manifest(tmp_path, monkeypatch):
     monkeypatch.setattr(pixelcut, "over_white", lambda it: real(touching(it)))
     with pytest.raises(pixelcut.PixelcutError, match="changed while"):
         pixelcut.join(out, tmp_path / "j.png")
+
+
+def test_trace_keeps_16_bit_grey_and_join_rejects_a_manifest_with_junk_entries(tmp_path):
+    import pixelcut
+    g = (np.linspace(0, 65535, 64 * 64).reshape(64, 64)).astype("uint16")
+    Image.fromarray(g).save(tmp_path / "g16.png")
+    pixelcut.trace(tmp_path / "g16.png", tmp_path / "g.svg")
+    svg = (tmp_path / "g.svg").read_text().upper()
+    assert "#FDFDFD" not in svg                                    # was one white blob: values above 255 were cut off
+    out = tmp_path / "p"
+    pixelcut.split(_mk(tmp_path), out, grid="2x2", opaque=True)
+    m = json.loads((out / "parts.json").read_text())
+    m["parts"] = [1, 1, 1, 1]
+    (out / "parts.json").write_text(json.dumps(m))
+    with pytest.raises(pixelcut.PixelcutError, match="damaged"):
+        pixelcut.join(out, tmp_path / "j.png")
+
+
+def test_upscale_hands_the_engine_upright_pixels(tmp_path, monkeypatch):
+    import pixelcut, subprocess
+    im = Image.new("RGB", (200, 100), (10, 20, 30))
+    ex = im.getexif()
+    ex[274] = 6
+    im.save(tmp_path / "rot.jpg", exif=ex)
+    seen = {}
+    def fake_run(cmd, **kw):
+        src = Path(cmd[cmd.index("-i") + 1])
+        seen["size"] = Image.open(src).size
+        Image.new("RGB", (10, 10)).save(cmd[cmd.index("-o") + 1])
+    monkeypatch.setattr(subprocess, "run", fake_run)
+    exe = tmp_path / "engine.exe"
+    exe.write_bytes(b"")
+    pixelcut.upscale(tmp_path / "rot.jpg", tmp_path / "u.png", scale=2, bin=str(exe))
+    assert seen["size"] == (100, 200)

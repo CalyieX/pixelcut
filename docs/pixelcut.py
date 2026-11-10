@@ -32,7 +32,7 @@ import numpy as np
 from PIL import Image, ImageOps
 
 
-__version__ = "1.6.12"
+__version__ = "1.6.13"
 PART_NAME = re.compile(r"part_(0|[1-9]\d*)\.png")                  # exactly the names split writes: no leading zeros
 LOSSLESS = (".png", ".tif", ".tiff")
 
@@ -370,6 +370,23 @@ def open_upright(path):
         im = ImageOps.exif_transpose(im)
     im.pixelcut_orientation = orient if orient in (2, 3, 4, 5, 6, 7, 8) else 1
     return im
+
+
+def decoded_8bit(path):
+    """The picture as 8-bit pixels the way every other command sees it (upright, 16 bit scaled with a notice, limits checked).
+    Keeps transparency (RGBA) where the file has some; otherwise RGB. For tools that read a file themselves (vtracer, the upscale engine):
+    they get exactly these pixels instead of reading the original a second time with their own, different decoder."""
+    need_picture(path)
+    with Image.open(path) as probe:
+        has_alpha = "A" in probe.getbands() or "transparency" in probe.info
+    if not has_alpha:
+        return Image.fromarray(load_rgb(path))
+    pic = open_upright(path)
+    if pic.width * pic.height > 150_000_000:
+        sys.exit("image too large (%d x %d = %d MP, limit 150 MP)" % (pic.width, pic.height, pic.width * pic.height // 1_000_000))
+    if getattr(pic, "n_frames", 1) > 1:
+        print("note: %s has %d frames - only the first one is used" % (path, pic.n_frames), file=sys.stderr)
+    return pic.convert("RGBA")
 
 
 def upright_array(arr, orient):
@@ -909,11 +926,10 @@ def _cmd_join(a, held):
         try:
             manifest_bytes = manifest.read_bytes()            # kept: it is checked again after reading, like the parts
             m = json.loads(manifest_bytes.decode("utf-8"))
-            n = len(m["parts"])
+            names = manifest_files(m)                         # the same check split --from-labels/compare use
+            n = len(names)
             size = tuple(m["size"])
-            assert len(size) == 2 and all(isinstance(v, int) and v > 0 for v in size) and n > 0
-            names = m.get("files") or ["part_%d.png" % k for k in range(n)]
-            assert len(names) == n == len(set(names)) and all(isinstance(x, str) and PART_NAME.fullmatch(x) for x in names)
+            assert all(PART_NAME.fullmatch(x) for x in names)
         except (ValueError, KeyError, TypeError, AssertionError, AttributeError):
             sys.exit("parts.json is damaged (needs 'size' [w,h], 'parts' and matching 'files')")
         files = [Path(a.parts) / x for x in names]
@@ -1010,12 +1026,12 @@ def cmd_trace(a):
         sys.exit("error: the SVG must be a different file than the input")
     if a.render and Path(a.render).resolve() in (here, Path(a.output).resolve()):
         sys.exit("error: --render must be a different file than the input and the SVG")
-    pic = open_upright(a.input)                               # turned upright like a viewer shows it; Pillow decides whether it is readable
+    pic = decoded_8bit(a.input)                               # upright, 16 bit scaled with a notice - like compare/alpha/labels
     w, h = pic.size
     work, tmp_svg = scratch_beside(a.output)
     try:
         src = work / "input.png"                              # vtracer gets exactly the pixels we decoded, not a second reading of the file
-        pic.convert("RGBA").save(src)
+        pic.save(src)
         vtracer.convert_image_to_svg_py(str(src), str(tmp_svg), colormode="color", hierarchical="stacked", mode="spline",
                                         filter_speckle=a.speckle, color_precision=a.colors, layer_difference=a.layers,
                                         corner_threshold=60, length_threshold=3.5, splice_threshold=45, path_precision=3)
@@ -1134,7 +1150,9 @@ def cmd_upscale(a):
     if not engine_ok:
         tmp = work / "engine.png"                             # other endings (.tif, .bmp): engine -> png, then converted
     try:
-        subprocess.run([exe, "-i", str(Path(a.input).resolve()), "-o", str(tmp), "-n", a.model, "-s", str(a.scale)],
+        src = work / "input.png"                              # the engine ignores EXIF and 16 bit: it gets the pixels we decoded
+        decoded_8bit(a.input).save(src)
+        subprocess.run([exe, "-i", str(src), "-o", str(tmp), "-n", a.model, "-s", str(a.scale)],
                        check=True, cwd=str(Path(exe).parent), capture_output=True, timeout=1800)
         if not tmp.is_file() or tmp.stat().st_size == 0:
             raise OSError("the engine produced no picture")
