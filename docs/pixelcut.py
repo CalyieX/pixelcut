@@ -32,7 +32,7 @@ import numpy as np
 from PIL import Image, ImageOps
 
 
-__version__ = "1.6.9"
+__version__ = "1.6.10"
 PART_NAME = re.compile(r"part_(0|[1-9]\d*)\.png")                  # exactly the names split writes: no leading zeros
 LOSSLESS = (".png", ".tif", ".tiff")
 
@@ -99,7 +99,7 @@ def _lock(f):
         return "busy" if e.errno in (errno.EACCES, errno.EAGAIN, errno.EDEADLK, getattr(errno, "EWOULDBLOCK", errno.EAGAIN)) else "unavailable"
 
 
-def lock_folder(folder, held):
+def lock_folder(folder, held, quiet=False, busy=None):
     """One pixelcut run at a time may change the files of a folder. The lock lives as long as the process holds the open file, so
     a crashed run never leaves a stale lock behind. Returns True if the lock is held; False where locking does not work (then
     nothing can be told about other runs). Another live run: exit with a clear message. `held` collects the handle to close."""
@@ -107,6 +107,8 @@ def lock_folder(folder, held):
     try:
         f = open(path, "a+b")
     except OSError:                                           # a lock file we cannot open (read-only folder/file): work without it, and say so
+        if quiet:
+            return False
         print("note: cannot create the lock file %s - two runs at once in this folder would not be noticed" % path, file=sys.stderr)
         return False
     held.append(f)
@@ -122,8 +124,8 @@ def lock_folder(folder, held):
                 pass
     state = _lock(f)
     if state == "busy":
-        sys.exit("error: another pixelcut run is working in %s right now - wait until it has finished" % folder)
-    if state == "unavailable" and sys.platform != "emscripten":
+        sys.exit(busy or "error: another pixelcut run is working in %s right now - wait until it has finished" % folder)
+    if state == "unavailable" and sys.platform != "emscripten" and not quiet:
         print("note: this file system cannot lock folders - two pixelcut runs at once in %s would not be noticed" % folder, file=sys.stderr)
     return state == "ok"
 
@@ -739,6 +741,9 @@ def _cmd_split(a, held):
     if staging.exists():
         if foreign_entries(staging):
             sys.exit("%s exists and does not look like pixelcut's own scratch folder - remove it first" % staging)
+        if not locked:                                        # without a working lock it may be a live run's folder: never delete it
+            sys.exit("error: %s exists - it may belong to a run that is still working, and this system cannot check that. "
+                     "Make sure no other pixelcut is running in %s, then delete that folder" % (staging, out))
         shutil.rmtree(staging)
     try:
         staging.mkdir()
@@ -877,13 +882,25 @@ def cmd_key(a):
 # ----------------------------------------------------------------------------- join / compare
 def cmd_join(a):
     """Put parts back together (over white or a colour) - the way to 'rebuild' a picture from its exact pieces."""
+    held = []
+    try:
+        _cmd_join(a, held)
+    finally:
+        for f in held:
+            f.close()
+
+
+def _cmd_join(a, held):
     if not Path(a.parts).is_dir():
         sys.exit("error: %s is not a folder of parts (does not exist, or is a file)" % a.parts)
     for work in (".pixelcut_old", ".pixelcut_new", DONE):     # a split is running here or died in the middle: the set is not complete
         if (Path(a.parts) / work).exists():
             sys.exit("error: %s is being written (or a split was interrupted) - run split again, or wait until it has finished" % a.parts)
-    if folder_is_busy(a.parts):
-        sys.exit("error: a pixelcut run is writing in %s right now - try again when it has finished" % a.parts)
+    lock_folder(a.parts, held, quiet=True,                    # a split that starts while we read must wait: no mixed set, even if it rolls back
+                busy="error: a pixelcut run is writing in %s right now - try again when it has finished" % a.parts)
+    for work in (".pixelcut_old", ".pixelcut_new", DONE):     # looked at again under the lock: a split may have started in between
+        if (Path(a.parts) / work).exists():
+            sys.exit("error: %s is being written (or a split was interrupted) - run split again, or wait until it has finished" % a.parts)
     manifest = Path(a.parts) / "parts.json"
     size = None
     if manifest.exists():                                     # the manifest says which parts belong together - all of them are needed
@@ -1245,7 +1262,7 @@ def _warn_about(err):
     """Notes the command line prints that a program using the API must not miss (a backup left behind, a lock that did not work)."""
     import warnings
     for ln in err.getvalue().splitlines():
-        if ln.startswith("note:") and any(w in ln for w in ("left untouched", "still holds", "cannot tell", "cannot create the lock", "kept")):
+        if ln.startswith("note:") and any(w in ln for w in ("left untouched", "still holds", "cannot tell", "cannot create the lock", "cannot lock folders", "kept")):
             warnings.warn(ln[5:].strip(), UserWarning, stacklevel=4)
 
 

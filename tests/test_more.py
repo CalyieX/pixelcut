@@ -1423,3 +1423,42 @@ def test_a_file_system_without_locks_is_announced(tmp_path, monkeypatch, capsys)
         for f in held:
             f.close()
     assert "cannot lock folders" in capsys.readouterr().err
+
+
+def _mk(tmp_path):
+    Image.fromarray((np.random.RandomState(11).rand(30, 40, 3) * 255).astype("uint8")).save(tmp_path / "o.png")
+    return tmp_path / "o.png"
+
+
+def test_join_holds_the_folder_lock_while_it_reads(tmp_path, monkeypatch):
+    """A split that starts while join reads (and then rolls back) must not be able to mix old and new parts."""
+    import pixelcut
+    out = tmp_path / "p"
+    pixelcut.split(_mk(tmp_path), out, grid="2x2", opaque=True)
+    real = pixelcut.over_white
+    seen = {}
+    def probing(it):
+        seen["busy"] = pixelcut.folder_is_busy(out)
+        return real(it)
+    monkeypatch.setattr(pixelcut, "over_white", probing)
+    pixelcut.join(out, tmp_path / "j.png")
+    assert seen["busy"] is True
+    assert pixelcut.folder_is_busy(out) is False                   # released again afterwards
+
+
+def test_split_without_lock_never_deletes_a_foreign_scratch_folder(tmp_path, monkeypatch):
+    import pixelcut
+    monkeypatch.setattr(pixelcut, "_lock", lambda f: "unavailable")
+    out = tmp_path / "p"
+    (out / ".pixelcut_new").mkdir(parents=True)
+    (out / ".pixelcut_new" / "part_0.png").write_bytes(b"x")
+    with pytest.raises(pixelcut.PixelcutError, match="may belong to a run"):
+        pixelcut.split(_mk(tmp_path), out, grid="2x2", opaque=True)
+    assert (out / ".pixelcut_new" / "part_0.png").read_bytes() == b"x"
+
+
+def test_api_warns_when_the_file_system_cannot_lock(tmp_path, monkeypatch):
+    import pixelcut
+    monkeypatch.setattr(pixelcut, "_lock", lambda f: "unavailable")
+    with pytest.warns(UserWarning, match="cannot lock folders"):
+        pixelcut.split(_mk(tmp_path), tmp_path / "p", grid="2x2", opaque=True)
