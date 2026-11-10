@@ -1860,3 +1860,21 @@ def test_batch_names_a_folder_against_file_clash_and_is_in_all(tmp_path):
     with pytest.raises(pixelcut.PixelcutError, match="also the output of a.png"):
         pixelcut.batch("split", src, tmp_path / "sp", recursive=True, grid="2x2", opaque=True)
     assert "batch" in pixelcut.__all__
+
+
+def test_batch_never_overwrites_an_input_and_refuses_abbreviated_render(tmp_path):
+    import pixelcut
+    d = tmp_path / "D"
+    (d / "x" / "x").mkdir(parents=True)                             # output folder D is an ancestor of the input folder D/x
+    Image.new("RGB", (10, 10), "red").save(d / "x" / "a.png")
+    Image.new("RGB", (10, 10), "blue").save(d / "x" / "x" / "a.png")
+    with pytest.raises(pixelcut.PixelcutError, match="would overwrite one of the input"):
+        pixelcut.batch("upscale", d / "x", d, recursive=True, overwrite=True, scale=2, ai=False)
+    assert Image.open(d / "x" / "a.png").size == (10, 10)
+    src = _batch_folder(tmp_path / "s")
+    with pytest.raises(pixelcut.PixelcutError, match="--render"):
+        pixelcut.batch("trace", src, tmp_path / "o1", rend=str(tmp_path / "x.png"))
+    (tmp_path / "o2" / "a.png").mkdir(parents=True)                 # a folder where the output file should go: not "done"
+    (src / "bad.png").unlink()
+    with pytest.raises(pixelcut.PixelcutError, match="failed"):
+        pixelcut.batch("alpha", src, tmp_path / "o2")

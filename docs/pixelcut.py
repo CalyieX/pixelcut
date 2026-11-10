@@ -32,7 +32,7 @@ import numpy as np
 from PIL import Image, ImageOps
 
 
-__version__ = "1.7.1"
+__version__ = "1.7.2"
 PART_NAME = re.compile(r"part_(0|[1-9]\d*)\.png")                  # exactly the names split writes: no leading zeros
 LOSSLESS = (".png", ".tif", ".tiff")
 
@@ -1360,7 +1360,7 @@ def batch_is_done(command, target):
     if command in BATCH_DIR_DONE:
         return (target.is_dir() and all((target / n).is_file() for n in BATCH_DIR_DONE[command])
                 and not any((target / w).exists() for w in (".pixelcut_new", ".pixelcut_old", DONE)))
-    return target.exists()
+    return target.is_file()
 
 
 def cmd_batch(a):
@@ -1368,8 +1368,6 @@ def cmd_batch(a):
     import warnings
     if a.command not in BATCH_OUTPUT:
         sys.exit("error: batch works with %s (not %s)" % (", ".join(sorted(BATCH_OUTPUT)), a.command))
-    if any(r == "--render" or r.startswith("--render=") for r in a.rest):
-        sys.exit("error: --render names one file - every picture would overwrite it; render the SVGs afterwards")
     src, dst = Path(a.input_dir), Path(a.output_dir)
     if not src.is_dir():
         sys.exit("error: %s is not a folder" % src)
@@ -1377,10 +1375,12 @@ def cmd_batch(a):
         sys.exit("error: the output folder must be a different folder than the input folder")
     if dst.exists() and not dst.is_dir():
         sys.exit("error: %s exists and is not a folder" % dst)
-    try:                                                      # a wrong option is wrong for every picture: say so once, before anything is written
-        build_parser(_ApiParser).parse_args([a.command, "in.png", "out"] + list(a.rest))
+    try:                                                      # a wrong option (syntax) is wrong for every picture: say so once, before anything is written
+        parsed = build_parser(_ApiParser).parse_args([a.command, "in.png", "out"] + list(a.rest))
     except PixelcutError as e:
         sys.exit("error: %s" % e)
+    if getattr(parsed, "render", None):                       # checked on the parsed value: argparse accepts abbreviations such as --rend
+        sys.exit("error: --render names one file - every picture would overwrite it; render the SVGs afterwards")
     inside = dst.resolve() if src.resolve() in dst.resolve().parents else None
     pictures = batch_pictures(src, a.recursive, inside)
     if not pictures:
@@ -1393,6 +1393,11 @@ def cmd_batch(a):
     names = {}
     for pic, name in plan:
         names.setdefault(name.as_posix().lower(), []).append(pic.relative_to(src).as_posix())
+    inputs = {os.path.normcase(str(p.resolve())) for p, _ in plan}
+    for pic, name in plan:                                    # an output that lands on (or above) an input would destroy it - also when dst is an ancestor of src
+        t = os.path.normcase(str((dst / name).resolve()))
+        if t in inputs or (kind == "dir" and any(i.startswith(t + os.sep) for i in inputs)):
+            sys.exit("error: the output of %s would overwrite one of the input pictures (%s); use an output folder that does not contain the input folder" % (pic.relative_to(src).as_posix(), name.as_posix()))
     dst.mkdir(parents=True, exist_ok=True)
     done, skipped, failed = 0, 0, []
     for n, (pic, name) in enumerate(plan, 1):
@@ -1412,6 +1417,11 @@ def cmd_batch(a):
             print("%s: skipped (%s exists, use --overwrite)" % (label, name.as_posix()))
             continue
         try:
+            if pic.suffix.lower() == ".gif":
+                from PIL import Image
+                with Image.open(pic) as g:
+                    if getattr(g, "n_frames", 1) > 1:
+                        print("    note: %s has %d frames - only the first one is used" % (rel.as_posix(), g.n_frames))
             target.parent.mkdir(parents=True, exist_ok=True)
             with warnings.catch_warnings(record=True) as notes:
                 warnings.simplefilter("always")
