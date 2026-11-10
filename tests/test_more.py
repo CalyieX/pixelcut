@@ -1748,3 +1748,57 @@ def test_real_engine_makes_no_dark_ring_around_a_shape_on_transparency(tmp_path)
     assert out.shape[:2] == (192, 192)
     solid = out[:, :, 3] > 200
     assert out[solid][:, 0].min() > 190                              # without the colour fill the edge reaches ~130
+
+
+def _batch_folder(tmp_path):
+    src = tmp_path / "in"
+    (src / "sub").mkdir(parents=True)
+    for n in ("a.png", "b.jpg", "sub/c.png"):
+        Image.fromarray((np.random.RandomState(1).rand(40, 60, 3) * 255).astype("uint8")).save(src / n)
+    (src / "bad.png").write_bytes(b"not a picture")
+    return src
+
+
+def test_batch_runs_every_picture_alone_and_reports_the_bad_one(tmp_path):
+    import pixelcut
+    src = _batch_folder(tmp_path)
+    with pytest.raises(pixelcut.PixelcutError, match=r"1 of 3 pictures failed:\n  bad.png"):
+        pixelcut.batch("alpha", src, tmp_path / "out")
+    assert sorted(f.name for f in (tmp_path / "out").iterdir()) == ["a.png", "b.png"]          # the good ones are done, no sub-folders without --recursive
+
+
+def test_batch_skips_existing_outputs_unless_overwrite_and_keeps_the_folder_layout(tmp_path):
+    import pixelcut
+    src = _batch_folder(tmp_path)
+    (src / "bad.png").unlink()
+    pixelcut.batch("upscale", src, tmp_path / "up", recursive=True, scale=2, no_ai=True)
+    assert Image.open(tmp_path / "up" / "sub" / "c.png").size == (120, 80)
+    (tmp_path / "up" / "a.png").write_bytes(b"mine")
+    out = pixelcut.batch("upscale", src, tmp_path / "up", recursive=True, scale=2, no_ai=True)
+    assert "skipped" in out and (tmp_path / "up" / "a.png").read_bytes() == b"mine"             # never replaced without --overwrite
+    pixelcut.batch("upscale", src, tmp_path / "up", recursive=True, overwrite=True, scale=2, no_ai=True)
+    assert Image.open(tmp_path / "up" / "a.png").size == (120, 80)
+
+
+def test_batch_split_makes_one_folder_per_picture_and_joins_exactly(tmp_path):
+    import pixelcut
+    src = _batch_folder(tmp_path)
+    (src / "bad.png").unlink()
+    pixelcut.batch("split", src, tmp_path / "sp", grid="2x2", opaque=True)
+    pixelcut.join(tmp_path / "sp" / "a", tmp_path / "a_back.png")
+    assert np.array_equal(np.array(Image.open(src / "a.png").convert("RGB")), np.array(Image.open(tmp_path / "a_back.png").convert("RGB")))
+
+
+def test_batch_refuses_wrong_commands_same_folder_and_names_clashes(tmp_path):
+    import pixelcut
+    src = _batch_folder(tmp_path)
+    (src / "bad.png").unlink()
+    with pytest.raises(pixelcut.PixelcutError, match="batch works with"):
+        pixelcut.batch("join", src, tmp_path / "o")
+    with pytest.raises(pixelcut.PixelcutError, match="different folder"):
+        pixelcut.batch("alpha", src, src)
+    Image.new("RGB", (5, 5)).save(src / "a.jpg")                    # a.png and a.jpg would both become a.png
+    with pytest.raises(pixelcut.PixelcutError, match="already used"):
+        pixelcut.batch("alpha", src, tmp_path / "o2")
+    with pytest.raises(pixelcut.PixelcutError, match="unrecognized arguments"):
+        pixelcut.batch("alpha", src, tmp_path / "o3", bogus=True)               # a wrong option is reported once, not per picture
