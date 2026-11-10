@@ -32,7 +32,7 @@ import numpy as np
 from PIL import Image, ImageOps
 
 
-__version__ = "1.6.17"
+__version__ = "1.6.18"
 PART_NAME = re.compile(r"part_(0|[1-9]\d*)\.png")                  # exactly the names split writes: no leading zeros
 LOSSLESS = (".png", ".tif", ".tiff")
 
@@ -1156,6 +1156,24 @@ def read_engine_result(path):
     return arr
 
 
+def bleed_colour(im):
+    """RGBA picture whose fully transparent pixels carry the colour of their opaque neighbours (alpha untouched), so that a resampler
+    working on the colour channels does not pull black into the edge of a shape."""
+    arr = np.array(im)
+    solid = arr[:, :, 3] > 0
+    if solid.all() or not solid.any():
+        return im
+    rgb = arr[:, :, :3].astype(np.float32)
+    m = solid.astype(np.float32)
+    num = cv2.blur(rgb * m[:, :, None], (15, 15))
+    den = cv2.blur(m, (15, 15))
+    fill = num / np.maximum(den, 1e-6)[:, :, None]
+    far = den <= 1e-6                                          # farther than the kernel from any solid pixel: the mean of the solid ones
+    fill[far] = rgb[solid].mean(axis=0)
+    arr[~solid, :3] = np.clip(fill[~solid] + 0.5, 0, 255).astype(np.uint8)
+    return Image.fromarray(arr, "RGBA")
+
+
 def check_upscaled_size(im, scale):
     if im.width * im.height * scale * scale > 600_000_000:
         sys.exit("error: the result would be %d x %d = %d MP (limit 600 MP) - use a smaller --scale or a smaller picture"
@@ -1200,6 +1218,8 @@ def cmd_upscale(a):
         needs_decode = a.scale != 4 or not engine_ok          # then the 4x picture (16 x the input) is held in memory once
         if needs_decode and pic.width * pic.height * 16 > 400_000_000:
             return lanczos_upscale(a, "the AI picture at this factor would need too much memory (%d MP)" % (pic.width * pic.height * 16 // 1_000_000))
+        if pic.mode == "RGBA":
+            pic = bleed_colour(pic)                           # the engine blurs across edges: colour under transparent pixels must not be black
         pic.save(src)
         subprocess.run([exe, "-i", str(src), "-o", str(tmp), "-n", a.model, "-s", "4"],      # the models are 4x models: other factors give a wrong picture
                        check=True, cwd=str(Path(exe).parent), capture_output=True, timeout=1800)
@@ -1211,15 +1231,16 @@ def cmd_upscale(a):
             arr = read_engine_result(tmp)
             if a.scale != 4:                                  # the wanted factor: resize the 4x result
                 arr = cv2.resize(arr, (pic.width * a.scale, pic.height * a.scale), interpolation=cv2.INTER_AREA if a.scale < 4 else cv2.INTER_LANCZOS4)
-            made = Image.fromarray(np.ascontiguousarray(arr[:, :, [2, 1, 0] if arr.shape[2] == 3 else [2, 1, 0, 3]]))
+            made = Image.fromarray(cv2.cvtColor(arr, cv2.COLOR_BGR2RGB if arr.shape[2] == 3 else cv2.COLOR_BGRA2RGBA))
             del arr
-            if engine_ok:
-                made.save(tmp, **({"quality": 95} if target.suffix.lower() in (".jpg", ".jpeg") else {}))
+            if engine_ok:                                     # written by us here (the engine's own file was resized): keep it as lossless as the format allows
+                ext = target.suffix.lower()
+                made.save(tmp, **({"quality": 95, "subsampling": 0} if ext in (".jpg", ".jpeg") else {"lossless": True} if ext == ".webp" else {}))
                 os.replace(tmp, target)
             else:
                 save_atomic(made, target)
-    except BadEngineResult as e:
-        return lanczos_upscale(a, str(e))
+    except (BadEngineResult, cv2.error) as e:
+        return lanczos_upscale(a, str(e) if isinstance(e, BadEngineResult) else "OpenCV could not handle the AI picture")
     except MemoryError:
         return lanczos_upscale(a, "not enough memory for the AI result")
     except subprocess.TimeoutExpired:

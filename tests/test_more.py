@@ -1588,7 +1588,7 @@ def _fake_engine(tmp_path, monkeypatch, seen):
         seen["scale"] = cmd[cmd.index("-s") + 1]
         src = Image.open(cmd[cmd.index("-i") + 1])
         seen["mode"] = src.mode
-        Image.new(src.mode if src.mode in ("RGB", "RGBA") else "RGB", (src.width * 4, src.height * 4), (1, 2, 3)).save(cmd[cmd.index("-o") + 1])
+        Image.new(src.mode if src.mode in ("RGB", "RGBA") else "RGB", (src.width * 4, src.height * 4), (1, 2, 3)).save(cmd[cmd.index("-o") + 1], lossless=True) if cmd[cmd.index("-o") + 1].endswith(".webp") else Image.new(src.mode if src.mode in ("RGB", "RGBA") else "RGB", (src.width * 4, src.height * 4), (1, 2, 3)).save(cmd[cmd.index("-o") + 1])
     monkeypatch.setattr(subprocess, "run", fake_run)
     exe = tmp_path / "engine.exe"
     exe.write_bytes(b"")
@@ -1691,3 +1691,34 @@ def test_join_refuses_16_bit_tiff_parts(tmp_path):
         (out / ("part_%d.png" % k)).write_bytes((tmp_path / "x.tif").read_bytes())      # a TIFF under a part name
     with pytest.raises(pixelcut.PixelcutError, match="8 bit"):
         pixelcut.join(out, tmp_path / "j.png")
+
+
+def test_upscale_falls_back_when_opencv_itself_fails(tmp_path, monkeypatch):
+    import pixelcut, cv2
+    Image.new("RGB", (30, 20), (9, 9, 9)).save(tmp_path / "a.png")
+    exe = _fake_engine(tmp_path, monkeypatch, {})
+    def boom(*a, **k):
+        raise cv2.error("out of memory")
+    monkeypatch.setattr(cv2, "resize", boom)
+    pixelcut.upscale(tmp_path / "a.png", tmp_path / "u.png", scale=2, bin=exe)
+    assert Image.open(tmp_path / "u.png").size == (60, 40)
+
+
+def test_upscale_writes_webp_lossless_and_jpg_without_chroma_subsampling_when_it_resizes(tmp_path, monkeypatch):
+    import pixelcut
+    from PIL import JpegImagePlugin
+    Image.new("RGB", (30, 20), (1, 2, 3)).save(tmp_path / "a.png")
+    exe = _fake_engine(tmp_path, monkeypatch, {})
+    pixelcut.upscale(tmp_path / "a.png", tmp_path / "u.webp", scale=2, bin=exe)
+    assert Image.open(tmp_path / "u.webp").convert("RGB").getpixel((5, 5)) == (1, 2, 3)
+    pixelcut.upscale(tmp_path / "a.png", tmp_path / "u.jpg", scale=2, bin=exe)
+    assert JpegImagePlugin.get_sampling(Image.open(tmp_path / "u.jpg")) == 0
+
+
+def test_bleed_colour_fills_transparent_pixels_with_the_neighbouring_colour_and_keeps_alpha(tmp_path):
+    import pixelcut
+    a = np.zeros((40, 40, 4), np.uint8)
+    a[10:30, 10:30] = (255, 255, 255, 255)
+    out = np.array(pixelcut.bleed_colour(Image.fromarray(a, "RGBA")))
+    assert (out[:, :, 3] == a[:, :, 3]).all()
+    assert out[8, 20, :3].min() > 240 and out[20, 20, 0] == 255      # the border pixel is white now, not black

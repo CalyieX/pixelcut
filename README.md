@@ -157,7 +157,7 @@ python pixelcut.py trace bild.png bild.svg --render bild_trace.png    # vtracer
 python pixelcut.py upscale bild.png gross.png    # holt Real-ESRGAN beim ersten Mal selbst
 ```
 
-Grenzen von `upscale`: Eingabe höchstens 150 MP, Ergebnis höchstens 600 MP, `--scale` 1 bis 8. Die KI rechnet immer in 4-facher Größe und wird danach auf den gewünschten Faktor gebracht; bei anderen Faktoren als 4 liegt das 4-fache Zwischenbild einmal im Speicher (etwa 0,11 GB je Megapixel Eingabe, ein 12-MP-Foto braucht rund 1,8 GB). Wird es zu groß, nimmt das Tool Lanczos und sagt es. `join` arbeitet nur mit 8-Bit-Teilen, wie `split` sie schreibt.
+Grenzen von `upscale`: Eingabe höchstens 150 MP, Ergebnis höchstens 600 MP, `--scale` 1 bis 8. Die KI rechnet immer in 4-facher Größe und wird danach auf den gewünschten Faktor gebracht; bei anderen Faktoren als 4 liegt das 4-fache Zwischenbild einmal im Speicher (etwa 0,11 GB je Megapixel Eingabe, bei TIF/BMP als Ziel bis 0,17 GB; ein 12-MP-Foto braucht rund 1,3 bis 2 GB). Wird es zu groß, nimmt das Tool Lanczos und sagt es. `join` arbeitet nur mit 8-Bit-Teilen, wie `split` sie schreibt.
 
 Zwei Fremdverfahren, damit man selbst messen kann, wie weit sie vom Original abweichen. Beide **ändern Pixel** und sind nicht mehr exakt.
 
@@ -227,7 +227,7 @@ pip install -e ".[test]"
 pytest -q
 ```
 
-204 Tests. Sie prüfen die gespeicherten Dateien: Rundlauf split + join ist exakt (Zeichnung, Foto, gerade und Zickzack), die Teile überlappen nicht, Polygone, Winkel, Mitte, Größe und dickster Punkt stimmen mit den Teilen überein, `compare`, `key` und `alpha` rechnen richtig, `join` verweigert fehlende oder falsch große Teile, `split` fasst fremde Dateien nicht an, und schlechte Eingaben ergeben eine klare Fehlerzeile. Eingebaute Fehler (Mutationen) werden gefangen.
+210 Tests. Sie prüfen die gespeicherten Dateien: Rundlauf split + join ist exakt (Zeichnung, Foto, gerade und Zickzack), die Teile überlappen nicht, Polygone, Winkel, Mitte, Größe und dickster Punkt stimmen mit den Teilen überein, `compare`, `key` und `alpha` rechnen richtig, `join` verweigert fehlende oder falsch große Teile, `split` fasst fremde Dateien nicht an, und schlechte Eingaben ergeben eine klare Fehlerzeile. Eingebaute Fehler (Mutationen) werden gefangen.
 
 ---
 
