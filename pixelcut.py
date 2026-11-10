@@ -32,7 +32,7 @@ import numpy as np
 from PIL import Image, ImageOps
 
 
-__version__ = "1.6.18"
+__version__ = "1.6.19"
 PART_NAME = re.compile(r"part_(0|[1-9]\d*)\.png")                  # exactly the names split writes: no leading zeros
 LOSSLESS = (".png", ".tif", ".tiff")
 

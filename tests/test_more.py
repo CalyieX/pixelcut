@@ -1722,3 +1722,29 @@ def test_bleed_colour_fills_transparent_pixels_with_the_neighbouring_colour_and_
     out = np.array(pixelcut.bleed_colour(Image.fromarray(a, "RGBA")))
     assert (out[:, :, 3] == a[:, :, 3]).all()
     assert out[8, 20, :3].min() > 240 and out[20, 20, 0] == 255      # the border pixel is white now, not black
+
+
+def _find_real_engine():
+    import glob
+    hits = glob.glob(str(Path.home() / ".cache" / "pixelcut" / "**" / "realesrgan-ncnn-vulkan*"), recursive=True)
+    return next((h for h in hits if not h.endswith((".zip", ".txt"))), None)
+
+
+def test_real_engine_makes_no_dark_ring_around_a_shape_on_transparency(tmp_path):
+    import pixelcut
+    exe = _find_real_engine()
+    if not exe:
+        pytest.skip("Real-ESRGAN is not installed here")
+    yy, xx = np.mgrid[:48, :48]
+    disc = ((yy - 24) ** 2 + (xx - 24) ** 2) < 14 ** 2
+    a = np.zeros((48, 48, 4), np.uint8)                              # black under the transparent pixels
+    a[disc] = (220, 30, 30, 255)
+    Image.fromarray(a, "RGBA").save(tmp_path / "d.png")
+    try:
+        pixelcut.upscale(tmp_path / "d.png", tmp_path / "u.png", scale=4, bin=exe)
+    except Exception as e:                                           # no Vulkan GPU on this machine
+        pytest.skip("engine cannot run here: %s" % e)
+    out = np.array(Image.open(tmp_path / "u.png").convert("RGBA"))
+    assert out.shape[:2] == (192, 192)
+    solid = out[:, :, 3] > 200
+    assert out[solid][:, 0].min() > 190                              # without the colour fill the edge reaches ~130
