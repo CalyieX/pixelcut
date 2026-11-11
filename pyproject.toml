@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "pixelcut"
-version = "1.9.4"
+version = "1.9.5"
 description = "Lossless image splitter and joiner: cut pictures into grids, wedges or label-map shapes without changing a pixel, plus color-to-alpha, upscale and batch."
 keywords = ["image-splitting", "image-slicer", "lossless", "pixel-perfect", "color-to-alpha", "transparent-background", "sprite", "ui-assets", "game-assets", "batch", "upscale", "cli"]
 classifiers = [
@@ -30,6 +30,7 @@ Issues = "https://github.com/CalyieX/pixelcut/issues"
 
 [project.optional-dependencies]
 test = ["pytest"]
+matting = ["pymatting"]
 
 [project.scripts]
 pixelcut = "pixelcut:main"

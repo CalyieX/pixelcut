@@ -33,7 +33,7 @@ import numpy as np
 from PIL import Image, ImageOps
 
 
-__version__ = "1.9.4"
+__version__ = "1.9.5"
 PART_NAME = re.compile(r"part_(0|[1-9]\d*)\.png")                  # exactly the names split writes: no leading zeros
 LOSSLESS = (".png", ".tif", ".tiff")
 
@@ -201,6 +201,9 @@ def _publish(pairs, held):
         if Path(dest).exists() and not os.access(dest, os.W_OK):
             sys.exit("error: %s is read-only - nothing was changed" % dest)
     aside = Path(tempfile.mkdtemp(prefix=".pixelcut_", dir=folder))
+    while aside.name.startswith(".pixelcut_gone_"):          # a random name must never look like a finished folder
+        aside.rmdir()
+        aside = Path(tempfile.mkdtemp(prefix=".pixelcut_", dir=folder))
     installed = []
     try:
         _write_atomic_text(aside / "publish.json", json.dumps({"dests": [str(Path(d).resolve()) for _, d in pairs],
@@ -213,7 +216,15 @@ def _publish(pairs, held):
             installed.append(dest)                            # before the move: an abort in between must still clean up
             os.replace(src, dest)
         gone = aside.with_name(".pixelcut_gone_" + aside.name[len(".pixelcut_"):])
-        os.replace(aside, gone)                               # the commit point: ONE rename. Before it a recovery goes back to the old set, after it the new set stays
+        for attempt in range(6):                              # an antivirus/indexer may hold a file in there for a moment: try again before giving up
+            try:
+                os.replace(aside, gone)                       # the commit point: ONE rename. Before it a recovery goes back to the old set, after it the new set stays
+                break
+            except PermissionError:
+                if attempt == 5:
+                    raise
+                import time
+                time.sleep(0.25)
         aside = gone
     except BaseException:
         if not aside.exists():                                # the rename happened: committed, nothing may be undone any more
@@ -227,8 +238,9 @@ def _publish(pairs, held):
                 stuck.append("%s (%s)" % (dest, e))
         try:
             (aside / "restoring").write_text("1")            # new files are gone: a later run must never delete again (it would hit restored originals)
-        except OSError:
-            pass
+        except OSError as e:                                  # without the marker restoring would be unsafe to repeat: keep the backups where they are
+            print("error: could not record rollback progress - your previous files are kept in %s (%s)" % (aside, e), file=sys.stderr)
+            raise
         for f in [f for f in aside.iterdir() if _slot(f.name)]:
             try:
                 os.replace(f, pairs[int(f.name)][1])
@@ -1337,6 +1349,22 @@ def swap_strand_pixels(rgb, healed, occ, picked):
         a2 = np.clip(al / core, 0, 1)
         pix[on] = Hc[None, :]
         soft[on] = a2[on]
+        try:                                                   # optional: a closed-form matting solver (pymatting) refines the opacity; without it the estimate above stands
+            from pymatting import estimate_alpha_cf
+            ys_, xs_ = np.nonzero(occ)
+            y0, y1, x0, x1 = max(ys_.min() - 8, 0), min(ys_.max() + 9, f.shape[0]), max(xs_.min() - 8, 0), min(xs_.max() + 9, f.shape[1])
+            oc = occ[y0:y1, x0:x1]
+            sure = oc & (lum[y0:y1, x0:x1] <= np.percentile(lum[occ], 40))
+            far = ~oc & (cv2.distanceTransform((~oc).astype(np.uint8), cv2.DIST_L2, 3) > 3)
+            tri = np.full(oc.shape, .5)
+            tri[sure], tri[far] = 1.0, 0.0
+            if sure.any() and far.any():
+                am = np.clip(estimate_alpha_cf(f[y0:y1, x0:x1].astype(np.float64) / 255, tri), 0, 1)
+                full = np.zeros_like(soft)
+                full[y0:y1, x0:x1] = am
+                soft[on] = np.maximum(full[on], .25 * a2[on])
+        except Exception:                                      # not installed or the solver failed: keep the own estimate
+            pass
         sb = cv2.GaussianBlur(soft, (0, 0), .6)                  # smooth, not stair-stepped, where the cover was cut out of the element
         soft[on] = sb[on]
     return pix, soft
@@ -1418,6 +1446,60 @@ def swap_hair_layer(rgb, out, picked, region, base):
     return hair, opacity.astype(np.float32), colour
 
 
+_SWAP_LAST = {}                                                # what the last swap run worked out (the scaled run needs it to build the full-size result)
+SWAP_AUTO_SCALE = False                                        # work-in-progress: analysing big pictures at small scale still leaves a faint rim, so it is off until it is clean
+SWAP_WORK_SIZE = 28                                            # px: the element size the analysis is tuned for (kernels, tolerances); bigger elements are analysed at this scale
+
+
+def swap_scaled(a, rgb, size_el):
+    """Analyse small, render fine. The analysis (what is the element, what lies over it, which way does the shadow fall) is tuned for an
+    element of about SWAP_WORK_SIZE px, so a bigger picture is first worked at that scale. The result is then carried back to the full
+    resolution as a DIFFERENCE to the original - everything that did not change stays bit-exact - and what lies on top of the element
+    (strands, hair, outlines) is taken from the full-size original again, so it stays sharp and untouched."""
+    import copy, tempfile
+    h, w = rgb.shape[:2]
+    f = SWAP_WORK_SIZE / float(size_el)
+    sw, sh_ = max(int(round(w * f)), 8), max(int(round(h * f)), 8)
+    small = cv2.resize(rgb, (sw, sh_), interpolation=cv2.INTER_AREA)
+    points = [tuple(int(v) for v in pt.split(",")) for pt in a.at.split(";")]
+    with tempfile.TemporaryDirectory() as td:
+        tin, tout = str(Path(td) / "in.png"), str(Path(td) / "out.png")
+        Image.fromarray(small).save(tin)
+        inner = copy.copy(a)
+        inner.input, inner.output, inner.cut, inner._inner = tin, tout, None, True
+        inner.grow = a.grow or 1                                   # a smoothly enlarged picture has a softer rim: take one px more
+        inner.at = ";".join("%d,%d" % (min(int(round(x * f)), sw - 1), min(int(round(y * f)), sh_ - 1)) for x, y in points)
+        cmd_swap(inner)
+        last = dict(_SWAP_LAST)
+    up = lambda m: cv2.resize(m.astype(np.float32), (w, h), interpolation=cv2.INTER_LINEAR)
+    base = rgb.astype(np.float32)
+    delta = last["out"] - small.astype(np.float32)
+    changed = cv2.dilate((np.abs(delta).max(2) > .5).astype(np.uint8), cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (5, 5)))   # a little more than what changed: the soft rim of the old element reaches out there
+    m_up = cv2.GaussianBlur(up(changed), (0, 0), max(1.0, .8 / f))                       # feathered, so the new area blends into the untouched picture
+    out_up = cv2.resize(last["out"], (w, h), interpolation=cv2.INTER_CUBIC)
+    final = base * (1 - m_up[:, :, None]) + out_up * m_up[:, :, None]
+    on = up(last["occ"] & last["picked"])
+    col = np.where((on > .5)[:, :, None], cv2.resize(last["strand"], (w, h), interpolation=cv2.INTER_LINEAR), base)
+    al = np.clip(up(last["soft"]), 0, 1)[:, :, None]
+    final = final * (1 - al) + col * al
+    d = last["base"][None, None, :] - out_up                                             # what the old element is at each place, against the new surface
+    tt = ((base - out_up) * d).sum(2) / np.maximum((d * d).sum(2), 1.0)
+    rim = (tt > .05) & (np.linalg.norm(base - (out_up + tt[..., None] * d), axis=2) < 45)   # a mix of old element and surface = the element's own soft rim, never cover
+    ring = cv2.dilate((m_up > .3).astype(np.uint8), cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (2 * int(3 / f) + 1,) * 2)) > 0
+    clean = cv2.GaussianBlur((ring & rim & (tt > .12)).astype(np.float32), (0, 0), 1.0)[:, :, None]   # left-over rim of the old element just outside the edited area goes too
+    final = final * (1 - clean) + out_up * clean
+    hu = np.clip((up(last["hair"]) - .15) / .7, 0, 1) * (~rim)
+    hu = hu[:, :, None]
+    final = final * (1 - hu) + base * hu
+    final = np.clip(final, 0, 255).round().astype(np.uint8)
+    save_atomic(Image.fromarray(final), a.output)
+    ch = (final != rgb).any(2)
+    cy, cx = np.nonzero(ch)
+    area = "" if len(cx) == 0 else " in a %dx%d px area" % (cx.max() - cx.min() + 1, cy.max() - cy.min() + 1)
+    print("scale: the element is %d px big, analysed at 1/%.1f size and rendered back at full resolution" % (size_el, 1 / f))
+    print("check: %d of %d pixels changed%s, the rest (%.2f%%) is identical to the original" % (int(ch.sum()), h * w, area, 100 * (1 - ch.mean())))
+
+
 def cmd_swap(a):
     """Take an element out of a picture (picked with one point), heal the place and, if asked, set a new shape there that looks like
     it belongs: pixelcut measures the original element's shading, outline and cast shadow and gives them to the new shape."""
@@ -1447,6 +1529,10 @@ def cmd_swap(a):
         sys.exit("error: the picked colour covers more than a quarter of the picture - pick a point on a small element or lower --tolerance")
     if picked.sum() < 4:
         sys.exit("error: almost nothing was picked at --at %s - raise --tolerance or pick the middle of the element" % a.at)
+    ys_p, xs_p = np.nonzero(picked)
+    size_el = max(xs_p.max() - xs_p.min() + 1, ys_p.max() - ys_p.min() + 1)
+    if SWAP_AUTO_SCALE and not getattr(a, "_inner", False) and size_el > 1.6 * SWAP_WORK_SIZE and not a.cut:
+        return swap_scaled(a, rgb, size_el)
     region = picked
     if a.grow:
         region = cv2.dilate(picked.astype(np.uint8), cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (2 * a.grow + 1,) * 2)) > 0
@@ -1549,6 +1635,7 @@ def cmd_swap(a):
         if cast_fit is not None:
             dark = cast * cast_fit[2] * .6 * (picked & ~hair & ~occ)
             out = out * (1 - dark)[:, :, None]
+    _SWAP_LAST.update(out=np.array(out, np.float32), occ=occ, hair=hair, soft=soft, strand=strand, picked=picked, base=base_col)
     save_atomic(Image.fromarray(np.clip(out, 0, 255).round().astype(np.uint8)), a.output)
     changed = (np.clip(out, 0, 255).round().astype(np.uint8) != rgb).any(2)
     cy, cx = np.nonzero(changed)
