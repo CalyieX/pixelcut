@@ -33,7 +33,7 @@ import numpy as np
 from PIL import Image, ImageOps
 
 
-__version__ = "1.9.6"
+__version__ = "1.9.7"
 PART_NAME = re.compile(r"part_(0|[1-9]\d*)\.png")                  # exactly the names split writes: no leading zeros
 LOSSLESS = (".png", ".tif", ".tiff")
 
@@ -1255,7 +1255,7 @@ def swap_occluders(rgb, picked, level=95):
     al = np.clip(((f3 - B) * dB).sum(2) / max(float((dB * dB).sum()), 1.0), 0, 1)
     re_ = np.linalg.norm(f3 - (B[None, None, :] + al[..., None] * dB[None, None, :]), axis=2)
     if os.environ.get("PIXELCUT_DEBUG"): print("occluders: Hc", Hc, "B", B)
-    on_element = picked & (al > .3 + (100 - level) / 250.0) & (re_ < 30)
+    on_element = picked & (al > .3 + (100 - level) / 250.0) & (re_ < SWAP_RE_MAX)
     occ |= on_element
     n, lab, st, _ = cv2.connectedComponentsWithStats(occ.astype(np.uint8), connectivity=8)
     keep = np.zeros_like(occ)
@@ -1542,6 +1542,7 @@ def swap_hair_layer(rgb, out, picked, region, base):
     return hair, opacity.astype(np.float32), colour
 
 
+SWAP_RE_MAX = 20                                               # how far from the straight cover-element colour line a pixel may lie and still count as cover (a shadow lies further off)
 _SWAP_LAST = {}                                                # what the last swap run worked out (the scaled run needs it to build the full-size result)
 SWAP_AUTO_SCALE = False                                        # work-in-progress: analysing big pictures at small scale still leaves a faint rim, so it is off until it is clean
 SWAP_WORK_SIZE = 28                                            # px: the element size the analysis is tuned for (kernels, tolerances); bigger elements are analysed at this scale
@@ -1729,7 +1730,10 @@ def cmd_swap(a):
         note += "; surface: " + ("flat" if surf is None or a.flat_surface else "curved (%s, tilt %.0f%%) - shape bent to follow it" % ("convex" if surf["bulge"] > .03 else "concave" if surf["bulge"] < -.03 else "tilted", surf["tilt"] * 100))
     if a.shape == "none":                                      # taken out: the shadow the cover threw on the element now falls on the surface below, as a subtle darkening of the surface
         if cast_fit is not None:
-            dark = cast * cast_fit[2] * .6 * (picked & ~hair & ~occ)
+            ys_p, xs_p = np.nonzero(picked)
+            sig = max(1.2, max(xs_p.max() - xs_p.min() + 1, ys_p.max() - ys_p.min() + 1) / 9.0)
+            feather = cv2.GaussianBlur((picked & ~hair & ~occ).astype(np.float32), (0, 0), sig)     # the shadow fades out where the old element ended - no cut-out of its silhouette
+            dark = cv2.GaussianBlur(cast, (0, 0), sig * .6) * cast_fit[2] * .6 * feather * (~hair) * (~occ)
             out = out * (1 - dark)[:, :, None]
     _SWAP_LAST.update(out=np.array(out, np.float32), occ=occ, hair=hair, soft=soft, strand=strand, picked=picked, base=base_col)
     save_atomic(Image.fromarray(np.clip(out, 0, 255).round().astype(np.uint8)), a.output)
