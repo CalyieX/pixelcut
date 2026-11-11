@@ -2321,3 +2321,18 @@ def test_recovery_leaves_an_empty_pixelcut_folder_of_a_running_command_alone(tmp
     scratch.mkdir()                                          # e.g. another command's scratch folder, still empty
     pixelcut.recover_publish(tmp_path)
     assert scratch.is_dir()
+
+
+def test_swap_keeps_a_light_strand_over_a_dark_ground_and_removes_only_the_element(tmp_path):
+    import pixelcut
+    base = np.full((80, 100, 3), (90, 90, 93), np.uint8)
+    base[28:44, 38:54] = (60, 110, 230)                                                       # blue square on a dark grey ground
+    for y in range(10, 70):                                                                    # a light 2 px strand crosses it
+        x = 30 + (y - 10) // 2
+        base[y, x:x + 2] = (230, 220, 214)
+    Image.fromarray(base).save(tmp_path / "l.png")
+    pixelcut.swap(tmp_path / "l.png", tmp_path / "o.png", at=(51, 41))
+    out = np.array(Image.open(tmp_path / "o.png").convert("RGB")).astype(int)
+    assert (out[30:42, 40:52, 2] - out[30:42, 40:52, 0]).max() < 40                              # the blue is gone (no pixel is bluer than red)
+    inside = [y for y in range(30, 42) if out[y, 30 + (y - 10) // 2: 32 + (y - 10) // 2].min() > 190]
+    assert len(inside) >= 10                                                                   # the light strand is still there over the old element

@@ -33,7 +33,7 @@ import numpy as np
 from PIL import Image, ImageOps
 
 
-__version__ = "1.9.8"
+__version__ = "1.9.9"
 PART_NAME = re.compile(r"part_(0|[1-9]\d*)\.png")                  # exactly the names split writes: no leading zeros
 LOSSLESS = (".png", ".tif", ".tiff")
 
@@ -1230,17 +1230,29 @@ def swap_occluders(rgb, picked, level=95):
     lum = lambda im: im[..., 0] * .299 + im[..., 1] * .587 + im[..., 2] * .114
     reach = cv2.dilate(closed.astype(np.uint8), np.ones((9, 9), np.uint8)) > 0     # also the part just outside the outline (the heal would eat it)
     cand = reach & ~picked
-    surface = swap_heal(rgb, reach)                                                   # what lies below, estimated over the element AND the candidate pixels
-    sat = (f3.max(2) - f3.min(2)) / np.maximum(f3.max(2), 1.0)
+    # What lies below, estimated over the element AND the candidate pixels. A thin cover next to the hole (the strand's own continuation outside)
+    # must not be healed INTO the hole - it would then look like the surface itself: pixels that differ clearly from the local median ground
+    # (a thin line is never the majority of a window) are kept out of the sources, only the hole is written back.
+    near_ring = (cv2.dilate(reach.astype(np.uint8), np.ones((31, 31), np.uint8)) > 0) & ~reach & ~picked
+    ground = cv2.medianBlur(np.ascontiguousarray(rgb), 15).astype(np.float32)
+    odd = near_ring & (np.abs(lum(f3) - lum(ground)) > 25)
+    surface = swap_heal(rgb, reach | odd, apply=reach)
+    sat =(f3.max(2) - f3.min(2)) / np.maximum(f3.max(2), 1.0)
     s_elem = float(np.median(sat[picked]))
     # Opaque cover or shadow? A shadow is the element itself, only darker: it keeps the element's saturation (a transparency factor on its colour).
     # A cover (hair, line work) is opaque: its colour is its own and does not depend on what lies below, so it is dull next to the element and
     # every pixel of it - the soft ends included - is a mix of ITS colour and the surface.
     shadow_like = sat >= .85 * s_elem
-    own = cand & ~shadow_like & (lum(f3) < lum(surface.astype(np.float32)) - 25)
+    diff = lum(f3) - lum(surface.astype(np.float32))
+    strong = cand & ~shadow_like & (np.abs(diff) > 25)                                 # a cover is darker OR lighter than what lies below (dark hair, a light strand on a dark ground)
+    if strong.sum() < 4:
+        return np.zeros_like(picked)
+    sgn = 1.0 if float(np.median(diff[strong])) > 0 else -1.0
+    own = strong & (sgn * diff > 0)
     if own.sum() < 4:
         return np.zeros_like(picked)
-    Hc = f3[own & (lum(f3) <= np.percentile(lum(f3)[own], 25))].mean(0)                # the cover's own colour: the darkest dull pixels
+    ext = own & ((lum(f3) <= np.percentile(lum(f3)[own], 25)) if sgn < 0 else (lum(f3) >= np.percentile(lum(f3)[own], 75)))
+    Hc = f3[ext].mean(0)                                                               # the cover's own colour: its most extreme dull pixels
     S = surface.astype(np.float32)
     d = S - Hc[None, None, :]
     a = np.clip(((S - f3) * d).sum(2) / np.maximum((d * d).sum(2), 1.0), 0, 1)       # how much of the pixel is cover (opacity)
@@ -1282,10 +1294,14 @@ def swap_score(rgb, out, region, occ, base):
     lump = float(occ.sum()) / max(zone.sum(), 1)                                                       # strand pixels beyond a thin line count against it
     # thin dark lines that were in the picture there must still be there: a strand lost in the heal is a visible change
     kern = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (5, 5))
-    line_in = float(cv2.morphologyEx(lum(f).astype(np.float32), cv2.MORPH_BLACKHAT, kern)[zone & (lum(f) < lum(base[None, None, :])[0, 0] * .8)].sum())
-    line_out = float(cv2.morphologyEx(lum(o).astype(np.float32), cv2.MORPH_BLACKHAT, kern)[zone & (lum(f) < lum(base[None, None, :])[0, 0] * .8)].sum())
+    lf_, lo_ = lum(f).astype(np.float32), lum(o).astype(np.float32)
+    amb = float(np.median(lf_[ring]))
+    mask_l = zone & (np.abs(lf_ - amb) > .25 * max(amb, 40.0))                                # a line is whatever stands clearly out from the surroundings, darker (hair) or lighter (a light strand on a dark ground)
+    line_in = float(np.maximum(cv2.morphologyEx(lf_, cv2.MORPH_BLACKHAT, kern), cv2.morphologyEx(lf_, cv2.MORPH_TOPHAT, kern))[mask_l].sum())
+    line_out = float(np.maximum(cv2.morphologyEx(lo_, cv2.MORPH_BLACKHAT, kern), cv2.morphologyEx(lo_, cv2.MORPH_TOPHAT, kern))[mask_l].sum())
     lost = max(0.0, line_in - line_out) / max(line_in, 1.0)
     reddish = 0.0
+    if os.environ.get('PIXELCUT_DEBUG'): print('score parts', residue, seam, lump, lost)
     return 12 * residue + seam + 1.5 * max(0.0, lump - .12) + 1.2 * lost + 4 * reddish
 
 
@@ -1320,7 +1336,8 @@ def swap_remove(rgb, picked, region0, base):
         if not region.any():
             continue
         lum_ = rgb[..., 0] * .299 + rgb[..., 1] * .587 + rgb[..., 2] * .114
-        dark = lum_ < 110
+        ring_ = (cv2.dilate(region.astype(np.uint8), np.ones((15, 15), np.uint8)) > 0) & ~(cv2.dilate(region.astype(np.uint8), np.ones((5, 5), np.uint8)) > 0)
+        dark = lum_ < min(110.0, .6 * float(np.median(lum_[ring_])))                      # "dark" is relative to the surroundings: on a dark ground only what is much darker than it is hair
         grown = lambda m, k: cv2.dilate(m.astype(np.uint8), np.ones((k, k), np.uint8)) > 0
         base_hole = region | grown(occ, 5) | (cov > 0)
         # hair next to the hole is no source for the skin below it: it is kept out of the sources (wide), but only the part right at the hole is rewritten
@@ -1425,7 +1442,9 @@ def swap_strand_pixels(rgb, healed, occ, picked):
         lum = f[..., 0] * .299 + f[..., 1] * .587 + f[..., 2] * .114
         lit = lum >= np.percentile(lum[picked], 60)
         B = np.median(f[picked & lit], axis=0)
-        dark_px = occ & (lum <= np.percentile(lum[occ], 25))
+        out_occ = occ & ~picked
+        light = float(np.median(lum[out_occ] if out_occ.any() else lum[occ])) > float(np.median(lum[picked]))   # a light strand on a dark element or the other way round
+        dark_px = occ & ((lum >= np.percentile(lum[occ], 75)) if light else (lum <= np.percentile(lum[occ], 25)))
         Hc = f[dark_px].mean(0)
         dB = Hc - B
         al = np.clip(((f - B) * dB).sum(2) / max(float((dB * dB).sum()), 1.0), 0, 1)
