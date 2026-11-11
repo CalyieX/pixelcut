@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "pixelcut"
-version = "1.9.2"
+version = "1.9.3"
 description = "Lossless image splitter and joiner: cut pictures into grids, wedges or label-map shapes without changing a pixel, plus color-to-alpha, upscale and batch."
 keywords = ["image-splitting", "image-slicer", "lossless", "pixel-perfect", "color-to-alpha", "transparent-background", "sprite", "ui-assets", "game-assets", "batch", "upscale", "cli"]
 classifiers = [

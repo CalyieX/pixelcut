@@ -33,7 +33,7 @@ import numpy as np
 from PIL import Image, ImageOps
 
 
-__version__ = "1.9.2"
+__version__ = "1.9.3"
 PART_NAME = re.compile(r"part_(0|[1-9]\d*)\.png")                  # exactly the names split writes: no leading zeros
 LOSSLESS = (".png", ".tif", ".tiff")
 
@@ -161,6 +161,20 @@ def publish(pairs):
             f.close()
 
 
+def _slot(name):
+    """A backup slot is a plain ASCII number ('0', '1', ...): isdigit() alone also accepts things like superscripts."""
+    return name.isascii() and name.isdigit()
+
+
+def _sha(path):
+    import hashlib
+    h = hashlib.sha256()
+    with open(path, "rb") as f:
+        for block in iter(lambda: f.read(1 << 20), b""):
+            h.update(block)
+    return h.hexdigest()
+
+
 def _publish(pairs, held):
     import tempfile
     folder = Path(pairs[0][1]).resolve().parent
@@ -175,7 +189,7 @@ def _publish(pairs, held):
     installed = []
     try:
         _write_atomic_text(aside / "publish.json", json.dumps({"dests": [str(Path(d).resolve()) for _, d in pairs],
-                                                               "sizes": [os.path.getsize(s) for s, _ in pairs]}))   # lets a later run undo an abort
+                                                               "hashes": [_sha(s) for s, _ in pairs]}))   # lets a later run undo an abort
         for i, (_, dest) in enumerate(pairs):
             if Path(dest).exists():
                 os.replace(dest, aside / str(i))
@@ -184,6 +198,12 @@ def _publish(pairs, held):
             installed.append(dest)                            # before the move: an abort in between must still clean up
             os.replace(src, dest)
         (aside / "committed").write_text("1")                 # the new set is complete: a later run only removes the backup
+        gone = aside.with_name(".pixelcut_gone_" + aside.name[len(".pixelcut_"):])
+        try:
+            os.replace(aside, gone)                           # ONE rename ends the transaction: rmtree deletes in any order and a kill in the middle must not leave a half-deleted note
+            aside = gone
+        except OSError:
+            pass
     except BaseException:
         stuck = []
         for dest in installed:
@@ -195,7 +215,7 @@ def _publish(pairs, held):
             (aside / "restoring").write_text("1")            # new files are gone: a later run must never delete again (it would hit restored originals)
         except OSError:
             pass
-        for f in [f for f in aside.iterdir() if f.name.isdigit()]:
+        for f in [f for f in aside.iterdir() if _slot(f.name)]:
             try:
                 os.replace(f, pairs[int(f.name)][1])
             except OSError as e:
@@ -219,8 +239,15 @@ def recover_publish(folder, locked=True):
         meta = d / "publish.json"
         if link_like(d) or not d.is_dir():
             continue
+        if d.name.startswith(".pixelcut_gone_") and locked:   # the name alone says: a finished transaction whose clean-up was cut short
+            shutil.rmtree(d, ignore_errors=True)
+            continue
+        try:
+            names = {f.name for f in d.iterdir()}
+        except OSError:
+            continue
         if not meta.is_file():
-            if locked and [f.name for f in d.iterdir()] == ["publish.json.tmp"]:     # died while writing its note: nothing in here to restore
+            if locked and list(names) == ["publish.json.tmp"]:     # died while writing its note: nothing in here to restore
                 shutil.rmtree(d, ignore_errors=True)
             continue
         if not locked:
@@ -231,23 +258,29 @@ def recover_publish(folder, locked=True):
             assert isinstance(dests, list) and all(isinstance(x, str) for x in dests)
             assert all(Path(x).resolve().parent == folder for x in dests)      # a renamed folder must not make us write elsewhere
         except (OSError, ValueError, KeyError, AssertionError):
-            if {f.name for f in d.iterdir()} <= {"publish.json", "publish.json.tmp"}:   # only our own half-written note: nothing of anybody's in here
+            if names <= {"publish.json", "publish.json.tmp"}:   # only our own half-written note: nothing of anybody's in here
                 shutil.rmtree(d, ignore_errors=True)
             else:
                 print("note: %s looks like a backup of an interrupted run but does not belong here - left untouched" % d, file=sys.stderr)
             continue
         try:
-            sizes = json.loads(meta.read_text(encoding="utf-8")).get("sizes")
-            if not (isinstance(sizes, list) and len(sizes) == len(dests) and all(isinstance(s, int) for s in sizes)):
-                sizes = None
+            hashes = json.loads(meta.read_text(encoding="utf-8")).get("hashes")
+            if not (isinstance(hashes, list) and len(hashes) == len(dests) and all(isinstance(h, str) for h in hashes)):
+                hashes = None
         except (OSError, ValueError):
-            sizes = None
+            hashes = None
         left = False
-        if not (d / "committed").exists():
+        try:
+            committed = (d / "committed").read_text() == "1"                  # an empty file from a failed write does not count
+        except OSError:
+            committed = False
+        if committed:
+            pass
+        else:
             if (d / "installing").exists() and not (d / "restoring").exists():
-                for i, x in enumerate(dests):                                  # only a file that is the new one we installed (same size) is removed
+                for i, x in enumerate(dests):                                  # only a file that is exactly the new one we installed (same content) is removed
                     p = Path(x)
-                    if sizes is not None and p.is_file() and not link_like(p) and p.stat().st_size == sizes[i]:
+                    if hashes is not None and p.is_file() and not link_like(p) and _sha(p) == hashes[i]:
                         p.unlink(missing_ok=True)
                     elif p.exists():
                         print("note: %s was not removed - it is not the file the interrupted run installed" % p, file=sys.stderr)
@@ -257,12 +290,13 @@ def recover_publish(folder, locked=True):
                     print("note: cannot record recovery progress in %s - left untouched" % d, file=sys.stderr)
                     continue
             restored = 0
-            for f in [f for f in d.iterdir() if f.name.isdigit()]:
-                if int(f.name) < len(dests):
+            for f in [f for f in d.iterdir() if _slot(f.name)]:
+                if int(f.name) < len(dests) and not os.path.lexists(dests[int(f.name)]):   # never over something that is there now
                     os.replace(f, dests[int(f.name)])
                     restored += 1
                 else:
                     left = True
+                    print("note: %s was not put back over %s - something is there" % (f, dests[int(f.name)] if int(f.name) < len(dests) else "?"), file=sys.stderr)
             if restored:
                 print("note: finished an interrupted earlier run in %s - the previous files are back" % folder, file=sys.stderr)
             if left:

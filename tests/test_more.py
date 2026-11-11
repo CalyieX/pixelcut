@@ -1190,7 +1190,9 @@ def test_publish_recovers_after_a_hard_abort(tmp_path):
         (d / "b.png").write_bytes(b"OLD-B")
         aside = d / ".pixelcut_crash"
         aside.mkdir()
-        (aside / "publish.json").write_text(_json.dumps({"dests": [str(x.resolve()) for x in dests]}))
+        import hashlib
+        (aside / "publish.json").write_text(_json.dumps({"dests": [str(x.resolve()) for x in dests],
+                                                         "hashes": [hashlib.sha256(b"NEW-A").hexdigest(), hashlib.sha256(b"NEW-B").hexdigest()]}))
         (aside / "lock").write_bytes(b"1")
         if state == "moving":                                  # a.png was moved aside, b.png not yet
             (aside / "0").write_bytes(b"OLD-A")
@@ -1226,7 +1228,7 @@ def _crashed_aside(folder, dests_names, installing=True, committed=False, dests_
     aside.mkdir()
     (aside / "lock").write_bytes(b"1")
     dests = dests_override or [str((folder / n).resolve()) for n in dests_names]
-    (aside / "publish.json").write_text(_json.dumps({"dests": dests, "sizes": [len(b"NEW-" + n.encode()) for n in dests_names]}))
+    (aside / "publish.json").write_text(_json.dumps({"dests": dests, "hashes": [__import__("hashlib").sha256(b"NEW-" + n.encode()).hexdigest() for n in dests_names]}))
     for i, n in enumerate(dests_names):
         (aside / str(i)).write_bytes(b"OLD-" + n.encode())
         (folder / n).write_bytes(b"NEW-" + n.encode())
@@ -2118,9 +2120,53 @@ def test_recovery_never_deletes_foreign_folders_or_unrelated_files(tmp_path):
     (forged / "publish.json").write_text(_json.dumps({"dests": [str(victim.resolve())]}))
     (forged / "installing").write_text("1")
     pixelcut.recover_publish(tmp_path)
-    assert victim.read_text() == "keep"                     # a note without matching sizes never deletes
+    assert victim.read_text() == "keep"                     # a note without matching hashes never deletes
     forged.mkdir(exist_ok=True)
-    (forged / "publish.json").write_text(_json.dumps({"dests": [str(victim.resolve())], "sizes": [999]}))
+    (forged / "publish.json").write_text(_json.dumps({"dests": [str(victim.resolve())], "hashes": ["0" * 64]}))
     (forged / "installing").write_text("1")
     pixelcut.recover_publish(tmp_path)
-    assert victim.read_text() == "keep"                     # size differs: not the file that was installed
+    assert victim.read_text() == "keep"                     # content differs: not the file that was installed
+
+
+def test_a_kill_while_the_finished_backup_is_cleaned_up_keeps_the_new_files(tmp_path):
+    import pixelcut
+    (tmp_path / "a.png").write_bytes(b"OLD-A")
+    (tmp_path / "a.new").write_bytes(b"NEW-A")
+    real = pixelcut.shutil.rmtree
+
+    def dying(path, *a, **k):
+        for f in sorted(Path(path).iterdir())[:1]:          # cleanup dies after removing the first entry only
+            f.unlink()
+        raise KeyboardInterrupt
+    pixelcut.shutil.rmtree = dying
+    try:
+        try:
+            pixelcut.publish([(tmp_path / "a.new", tmp_path / "a.png")])
+        except KeyboardInterrupt:
+            pass
+    finally:
+        pixelcut.shutil.rmtree = real
+    pixelcut.recover_publish(tmp_path)
+    assert (tmp_path / "a.png").read_bytes() == b"NEW-A"
+    assert not [x for x in tmp_path.glob(".pixelcut_*") if x.name != ".pixelcut_lock"]
+
+
+def test_recovery_does_not_overwrite_what_is_there_and_ignores_odd_slot_names(tmp_path):
+    import json as _json
+    import pixelcut
+    precious = tmp_path / "important.txt"
+    precious.write_text("PRECIOUS")
+    evil = tmp_path / ".pixelcut_evil"
+    evil.mkdir()
+    (evil / "publish.json").write_text(_json.dumps({"dests": [str(precious.resolve())]}))
+    (evil / "0").write_text("junk")
+    (evil / "\u00b2").write_text("odd")                     # superscript two: isdigit() but no slot
+    pixelcut.recover_publish(tmp_path)
+    assert precious.read_text() == "PRECIOUS" and (evil / "0").exists()
+    d = tmp_path / "w"
+    d.mkdir()
+    aside = _crashed_aside(d, ["a.png"], installing=False, committed=False)
+    (aside / "committed").write_text("")                    # empty marker from a failed write: not committed
+    (d / "a.png").unlink()                                  # the old file was moved aside, nothing is there now
+    pixelcut.recover_publish(d)
+    assert (d / "a.png").read_bytes() == b"OLD-a.png"
