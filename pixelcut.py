@@ -33,7 +33,7 @@ import numpy as np
 from PIL import Image, ImageOps
 
 
-__version__ = "1.9.0"
+__version__ = "1.9.2"
 PART_NAME = re.compile(r"part_(0|[1-9]\d*)\.png")                  # exactly the names split writes: no leading zeros
 LOSSLESS = (".png", ".tif", ".tiff")
 
@@ -174,7 +174,8 @@ def _publish(pairs, held):
     aside = Path(tempfile.mkdtemp(prefix=".pixelcut_", dir=folder))
     installed = []
     try:
-        _write_atomic_text(aside / "publish.json", json.dumps({"dests": [str(Path(d).resolve()) for _, d in pairs]}))   # lets a later run undo an abort
+        _write_atomic_text(aside / "publish.json", json.dumps({"dests": [str(Path(d).resolve()) for _, d in pairs],
+                                                               "sizes": [os.path.getsize(s) for s, _ in pairs]}))   # lets a later run undo an abort
         for i, (_, dest) in enumerate(pairs):
             if Path(dest).exists():
                 os.replace(dest, aside / str(i))
@@ -190,6 +191,10 @@ def _publish(pairs, held):
                 Path(dest).unlink(missing_ok=True)
             except OSError as e:
                 stuck.append("%s (%s)" % (dest, e))
+        try:
+            (aside / "restoring").write_text("1")            # new files are gone: a later run must never delete again (it would hit restored originals)
+        except OSError:
+            pass
         for f in [f for f in aside.iterdir() if f.name.isdigit()]:
             try:
                 os.replace(f, pairs[int(f.name)][1])
@@ -226,16 +231,31 @@ def recover_publish(folder, locked=True):
             assert isinstance(dests, list) and all(isinstance(x, str) for x in dests)
             assert all(Path(x).resolve().parent == folder for x in dests)      # a renamed folder must not make us write elsewhere
         except (OSError, ValueError, KeyError, AssertionError):
-            if not any(f.name.isdigit() for f in d.iterdir()):                 # nothing to restore: a half-written note only
+            if {f.name for f in d.iterdir()} <= {"publish.json", "publish.json.tmp"}:   # only our own half-written note: nothing of anybody's in here
                 shutil.rmtree(d, ignore_errors=True)
             else:
                 print("note: %s looks like a backup of an interrupted run but does not belong here - left untouched" % d, file=sys.stderr)
             continue
+        try:
+            sizes = json.loads(meta.read_text(encoding="utf-8")).get("sizes")
+            if not (isinstance(sizes, list) and len(sizes) == len(dests) and all(isinstance(s, int) for s in sizes)):
+                sizes = None
+        except (OSError, ValueError):
+            sizes = None
         left = False
         if not (d / "committed").exists():
-            if (d / "installing").exists():
-                for x in dests:
-                    Path(x).unlink(missing_ok=True)
+            if (d / "installing").exists() and not (d / "restoring").exists():
+                for i, x in enumerate(dests):                                  # only a file that is the new one we installed (same size) is removed
+                    p = Path(x)
+                    if sizes is not None and p.is_file() and not link_like(p) and p.stat().st_size == sizes[i]:
+                        p.unlink(missing_ok=True)
+                    elif p.exists():
+                        print("note: %s was not removed - it is not the file the interrupted run installed" % p, file=sys.stderr)
+                try:
+                    (d / "restoring").write_text("1")                          # from here a repeated recovery only puts backups back, never deletes
+                except OSError:
+                    print("note: cannot record recovery progress in %s - left untouched" % d, file=sys.stderr)
+                    continue
             restored = 0
             for f in [f for f in d.iterdir() if f.name.isdigit()]:
                 if int(f.name) < len(dests):
@@ -1014,6 +1034,7 @@ def swap_measure(rgb, healed, core, region):
     den = cv2.GaussianBlur(wgt, (0, 0), sig)
     filled = np.where(den > 1e-3, num / np.maximum(den, 1e-3), 1.0)
     shade = filled[y0:y1 + 1, x0:x1 + 1].astype(np.float32)
+    shade_abs = filled.astype(np.float32)
     # outline: the 1 px rim of the element against the body
     rim = region & ~(cv2.erode(region.astype(np.uint8), np.ones((3, 3), np.uint8)) > 0)
     outline = None
@@ -1021,18 +1042,33 @@ def swap_measure(rgb, healed, core, region):
         rim_c = rgb[rim].astype(np.float32).mean(0)
         if np.abs(rim_c - base).max() > 14 and lum(rim_c[None, None, :])[0, 0] < lbase - 8:
             outline = rim_c                                    # a darker rim: keep it as the new shape's outline
-    # cast shadow: how much darker the surface beside the element is in the original than in the healed picture
-    band = (cv2.dilate(region.astype(np.uint8), np.ones((2 * int(max(x1 - x0, y1 - y0) * .8) + 3,) * 2, np.uint8)) > 0) & ~(cv2.dilate(region.astype(np.uint8), np.ones((5, 5), np.uint8)) > 0)
-    drop = np.clip((lum(healed) - lum(rgb.astype(np.float32))) / np.maximum(lum(healed), 1), 0, 1) * band
-    strength = float(drop[band].mean()) if band.any() else 0.0
+    # cast shadow: the surface beside the element is compared with what the surface further away predicts (a plane fitted to a ring
+    # around it, hair and rim left out). Darker than predicted = the element's shadow; where it lies = the light direction.
     cx, cy = (x0 + x1) / 2, (y0 + y1) / 2
-    dy_, dx_ = np.nonzero(drop > .04)
-    if len(dx_) > 8 and strength > .02:
-        v = np.array([dx_.mean() - cx, dy_.mean() - cy], np.float32)
-        v = v / max(np.linalg.norm(v), 1e-3)
-    else:
-        v = np.array([.6, .8], np.float32)                     # nothing measured: light from the top left
-    return {"base": base, "shade": shade, "outline": outline, "shadow": strength, "dir": v, "box": (x0, y0, x1, y1)}
+    size = max(x1 - x0, y1 - y0) + 1
+    dist = cv2.distanceTransform((~region).astype(np.uint8), cv2.DIST_L2, 3)
+    far = (dist > size * .9) & (dist < size * 1.8)
+    near = (dist > 1.5) & (dist < size * .8)
+    L = lum(healed)
+    lo = lum(rgb.astype(np.float32))
+    skin = lo > 0.55 * float(np.median(L[far])) if far.any() else far
+    far, near = far & skin, near & skin
+    strength, v = 0.0, np.array([.6, .8], np.float32)             # nothing measured: light from the top left
+    if far.sum() > 30 and near.sum() > 8:
+        ys_, xs_ = np.nonzero(far)
+        A = np.stack([np.ones(len(xs_)), xs_ - cx, ys_ - cy], 1).astype(np.float64)
+        coef, *_ = np.linalg.lstsq(A, lo[ys_, xs_].astype(np.float64), rcond=None)
+        yn, xn = np.nonzero(near)
+        pred = coef[0] + coef[1] * (xn - cx) + coef[2] * (yn - cy)
+        drop = np.clip((pred - lo[yn, xn]) / np.maximum(pred, 1.0), 0, 1)
+        sel = drop > .03
+        if sel.sum() >= 4:
+            strength = float(drop[sel].mean())
+            wv = drop[sel]
+            vv = np.array([np.average(xn[sel] - cx, weights=wv), np.average(yn[sel] - cy, weights=wv)], np.float32)
+            if np.linalg.norm(vv) > 1e-3:
+                v = vv / np.linalg.norm(vv)
+    return {"base": base, "shade": shade, "shade_abs": shade_abs, "outline": outline, "shadow": strength, "dir": v, "box": (x0, y0, x1, y1)}
 
 
 def swap_surface(healed, region, box):
@@ -1121,28 +1157,39 @@ def swap_occluders(rgb, picked, level=95):
     if gap.sum() < 3:
         return np.zeros_like(picked)
     surface = swap_heal(rgb, closed)
+    if level is None:
+        return np.zeros_like(picked)
+    f3 = rgb.astype(np.float32)
     lum = lambda im: im[..., 0] * .299 + im[..., 1] * .587 + im[..., 2] * .114
-    l_elem = float(lum(rgb.astype(np.float32))[picked].mean())
-    darker = lum(rgb.astype(np.float32)) < np.minimum(l_elem * .5, lum(surface) - 25)   # clearly darker than the element AND the surface: line work lying over both
     reach = cv2.dilate(closed.astype(np.uint8), np.ones((9, 9), np.uint8)) > 0     # also the part just outside the outline (the heal would eat it)
-    occ = reach & ~picked & darker
-    # a single strand is a THIN dark line across the element, not a lump: dark pixels that survive no 3x3 opening are lines 1-2 px wide;
-    # wide dark areas are just the element in shade and get healed like the rest
-    flum = lum(rgb.astype(np.float32)).astype(np.float32)
-    dark = ((flum < l_elem * .8) & (cv2.dilate(picked.astype(np.uint8), np.ones((3, 3), np.uint8)) > 0)).astype(np.uint8)
-    thin = cv2.morphologyEx(flum, cv2.MORPH_BLACKHAT, cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (5, 5)))   # lines up to ~3 px wide that are darker than both sides
-    zone = dark > 0
-    if level is not None and zone.sum() >= 8:                                        # relative to this picture: the strongest thin lines in the element's dark part, not a fixed number
-        top = float(np.percentile(thin[zone], level))
-        strong = zone & (thin >= max(5.0, .6 * top))
-        weak = zone & (thin >= max(4.0, .45 * top))             # hysteresis: faint parts of a line count when they hang on a clear part
-        nw, lw = cv2.connectedComponents(weak.astype(np.uint8), connectivity=8)
-        line = np.isin(lw, np.unique(lw[strong])[np.unique(lw[strong]) > 0])
-    else:
-        line = zone & False
-    nl_, ll, stt, _ = cv2.connectedComponentsWithStats(line.astype(np.uint8), connectivity=8)
-    line = np.isin(ll, [i for i in range(1, nl_) if stt[i, cv2.CC_STAT_AREA] >= 6])   # a strand is a connected line, specks are not
-    occ |= line & ~(cv2.dilate(picked.astype(np.uint8), np.ones((3, 3), np.uint8)) == 0)
+    cand = reach & ~picked
+    surface = swap_heal(rgb, reach)                                                   # what lies below, estimated over the element AND the candidate pixels
+    sat = (f3.max(2) - f3.min(2)) / np.maximum(f3.max(2), 1.0)
+    s_elem = float(np.median(sat[picked]))
+    # Opaque cover or shadow? A shadow is the element itself, only darker: it keeps the element's saturation (a transparency factor on its colour).
+    # A cover (hair, line work) is opaque: its colour is its own and does not depend on what lies below, so it is dull next to the element and
+    # every pixel of it - the soft ends included - is a mix of ITS colour and the surface.
+    shadow_like = sat >= .85 * s_elem
+    own = cand & ~shadow_like & (lum(f3) < lum(surface.astype(np.float32)) - 25)
+    if own.sum() < 4:
+        return np.zeros_like(picked)
+    Hc = f3[own & (lum(f3) <= np.percentile(lum(f3)[own], 25))].mean(0)                # the cover's own colour: the darkest dull pixels
+    S = surface.astype(np.float32)
+    d = S - Hc[None, None, :]
+    a = np.clip(((S - f3) * d).sum(2) / np.maximum((d * d).sum(2), 1.0), 0, 1)       # how much of the pixel is cover (opacity)
+    res = np.linalg.norm(f3 - (S - a[..., None] * d), axis=2)                           # distance to "cover over surface"
+    a_min = .08 + (100 - level) / 250.0
+    occ = cand & ~shadow_like & (a > a_min) & (res < 30)
+    # Cover lying ON the element (a strand across a heart): its pixels are a mix of the cover's colour and the element's colour, so they sit on
+    # the straight line between the two. A shadow does not: it is the element colour made darker AND more saturated, which leaves that line.
+    lit = lum(f3) >= np.percentile(lum(f3)[picked], 60)
+    B = np.median(f3[picked & lit], axis=0)
+    dB = Hc - B
+    al = np.clip(((f3 - B) * dB).sum(2) / max(float((dB * dB).sum()), 1.0), 0, 1)
+    re_ = np.linalg.norm(f3 - (B[None, None, :] + al[..., None] * dB[None, None, :]), axis=2)
+    if os.environ.get("PIXELCUT_DEBUG"): print("occluders: Hc", Hc, "B", B)
+    on_element = picked & (al > .3 + (100 - level) / 250.0) & (re_ < 30)
+    occ |= on_element
     n, lab, st, _ = cv2.connectedComponentsWithStats(occ.astype(np.uint8), connectivity=8)
     keep = np.zeros_like(occ)
     for i in range(1, n):
@@ -1171,48 +1218,149 @@ def swap_score(rgb, out, region, occ, base):
     line_in = float(cv2.morphologyEx(lum(f).astype(np.float32), cv2.MORPH_BLACKHAT, kern)[zone & (lum(f) < lum(base[None, None, :])[0, 0] * .8)].sum())
     line_out = float(cv2.morphologyEx(lum(o).astype(np.float32), cv2.MORPH_BLACKHAT, kern)[zone & (lum(f) < lum(base[None, None, :])[0, 0] * .8)].sum())
     lost = max(0.0, line_in - line_out) / max(line_in, 1.0)
-    reddish = float(((f[..., 0] - f[..., 1] > 35) & occ).sum()) / max(float(occ.sum()), 1.0)   # a 'strand' that is red is element, not hair
+    reddish = 0.0
     return 12 * residue + seam + 1.5 * max(0.0, lump - .12) + 1.2 * lost + 4 * reddish
+
+
+def swap_rim(rgb, picked, region0, base):
+    """The grow ring around the element should hold only its antialiased rim (a mix of element and surface), never neighbouring
+    structure like the lit edge of hair. A ring pixel stays if its colour lies on the line between the element colour and the surface."""
+    f = rgb.astype(np.float32)
+    surf = swap_heal(rgb, picked)
+    ring = region0 & ~picked
+    d = base[None, None, :] - surf
+    dd = np.maximum((d * d).sum(2), 1.0)
+    t = ((f - surf) * d).sum(2) / dd
+    resid = np.linalg.norm(f - (surf + t[..., None] * d), axis=2)
+    ok = ring & (t > .06) & (resid < 60)
+    return picked | ok
 
 
 def swap_remove(rgb, picked, region0, base):
     """Take the element out. The strand lying over it is found at several strengths; each result is scored by swap_score and the best
     one is used - no per-picture tuning by the caller. Returns (out, region, occ, soft, strand, chosen level, score)."""
+    rim = swap_rim(rgb, picked, region0, base)
+    keep = region0 & ~rim & (np.abs(rgb.astype(np.float32) - swap_heal(rgb, picked)).max(2) > 30)                                       # ring pixels that are NOT element rim (e.g. lit hair edge): healed around, then put back as they were
     best = None
     for level in (None, 99, 95, 85, 70, 50):
         occ = swap_occluders(rgb, picked, level)
+        cov_a = cov_h = None                                   # the dark band across the element is the SHADOW of the strand, not hair: it goes with the shading
+        cov = cov_a if cov_a is not None else np.zeros(picked.shape, np.float32)
         region = region0 & ~occ
         if not region.any():
             continue
-        out = swap_heal(rgb, region | occ)
-        strand, soft = swap_strand_pixels(rgb, out, occ, picked)
+        out = swap_heal(rgb, region | cv2.dilate(occ.astype(np.uint8), np.ones((5, 5), np.uint8)).astype(bool) | (cov > 0))   # the soft edge of the cover is no source for the surface below
+        strand, soft = swap_strand_pixels(rgb, out, occ & ~(cov > 0), picked)
         out = out * (1 - soft[:, :, None]) + strand * soft[:, :, None]
+        if cov_h is not None:                                  # the cover over the element, translucent as before, now over the surface
+            out = out * (1 - cov[:, :, None]) + cov_h[None, None, :] * cov[:, :, None]
+        out = np.where(keep[:, :, None], rgb.astype(np.float32), out)
         sc = swap_score(rgb, out, region, occ, base)
-        if best is None or sc < best[-1] - 1e-4:
-            best = (out, region, occ, soft, strand, level, sc)
+        if best is None or sc < best[6] - 1e-4:
+            best = (out, region, occ | (cov > 0), soft, strand, level, sc, cov, cov_h)
     return best
 
 
 def swap_strand_pixels(rgb, healed, occ, picked):
-    """The top layer (hair) is never changed: the strand keeps its original pixels exactly, on top of whatever lies below it.
+    """The top layer (hair, strand, line work) is never changed. Where it lies outside the element its pixels stay exactly as they were.
+    Where it lay ON the element its pixels are a mix of the cover's colour and the element's: that mix is taken apart again into the
+    cover's own colour and its opacity (a strand is solid in its core, soft only at its edges), so it can lie on whatever comes below -
+    the surface after a removal or a new shape - with clean edges and not with a rim of the old element's colour.
     Returns (pixels, mask)."""
-    return rgb.astype(np.float32), occ.astype(np.float32)
+    f = rgb.astype(np.float32)
+    pix = f.copy()
+    soft = occ.astype(np.float32)
+    on = occ & picked
+    if on.sum() >= 4 and (occ & ~picked).sum() + on.sum() >= 6:
+        lum = f[..., 0] * .299 + f[..., 1] * .587 + f[..., 2] * .114
+        lit = lum >= np.percentile(lum[picked], 60)
+        B = np.median(f[picked & lit], axis=0)
+        dark_px = occ & (lum <= np.percentile(lum[occ], 25))
+        Hc = f[dark_px].mean(0)
+        dB = Hc - B
+        al = np.clip(((f - B) * dB).sum(2) / max(float((dB * dB).sum()), 1.0), 0, 1)
+        core = max(float(np.percentile(al[on], 90)), .3)
+        a2 = np.clip(al / core, 0, 1)
+        pix[on] = Hc[None, :]
+        soft[on] = a2[on]
+        sb = cv2.GaussianBlur(soft, (0, 0), .6)                  # smooth, not stair-stepped, where the cover was cut out of the element
+        soft[on] = sb[on]
+    return pix, soft
+
+
+def swap_sweep(mask, v, length, ss=4):
+    """Pull a mask along a direction: everything it would cover when moved up to `length` px. This is what a cast shadow is - the
+    caster slid away from the light. Rendered `ss` times finer than the picture and averaged down, so its edges are smooth, not stair steps."""
+    h, w = mask.shape
+    hi = cv2.resize(mask.astype(np.float32), (w * ss, h * ss), interpolation=cv2.INTER_LINEAR)
+    hi = cv2.GaussianBlur(hi, (0, 0), ss * .35)                    # the cover's own edge is soft already: carry that over
+    acc = hi.copy()
+    for t in np.arange(.5, length + .01, .5):
+        acc = np.maximum(acc, cv2.warpAffine(hi, np.float32([[1, 0, v[0] * t * ss], [0, 1, v[1] * t * ss]]), (w * ss, h * ss), flags=cv2.INTER_LINEAR))
+    acc = cv2.GaussianBlur(acc, (0, 0), ss * .45)
+    return cv2.resize(acc, (w, h), interpolation=cv2.INTER_AREA)
+
+
+def swap_cast_fit(rgb, picked, occ):
+    """Which way, how far and how strongly does the cover on the element throw its shadow? Measured on the ORIGINAL: slide the cover in
+    many directions and lengths and keep the one whose shadow agrees best with the element's darkened part. Returns (direction,
+    length, strength) or None when the element shows no shadow of its cover."""
+    f = rgb.astype(np.float32)
+    lum = f[..., 0] * .299 + f[..., 1] * .587 + f[..., 2] * .114
+    cover = occ & (cv2.dilate(picked.astype(np.uint8), np.ones((5, 5), np.uint8)) > 0)
+    body = picked & ~occ
+    if cover.sum() < 3 or body.sum() < 12:
+        return None
+    lit = body & (lum >= np.percentile(lum[body], 60))
+    ratio = lum / max(float(lum[lit].mean()), 1.0)
+    dm = body & (ratio < .8)
+    if dm.sum() < 6:
+        return None
+    ys, xs = np.nonzero(picked)
+    size = max(xs.max() - xs.min() + 1, ys.max() - ys.min() + 1)
+    best, best_score = None, 0.0
+    for ang in np.arange(0, 360, 15):
+        v = np.array([np.cos(np.radians(ang)), np.sin(np.radians(ang))], np.float32)
+        for length in range(2, int(size * .8) + 1, 2):
+            sw = (swap_sweep(cover, v, length, ss=1) > .5) & body & ~cover
+            inter = float((sw & dm).sum())
+            score = inter / max(float((sw | dm).sum()), 1.0)
+            if score > best_score:
+                best, best_score = (v, float(length), sw), score
+    if best is None or best_score < .2:
+        return None
+    v, length, sw = best
+    strength = float(np.clip(1.0 - np.median(ratio[sw & dm]), .1, .5))
+    return v, length, strength
+
+
+def swap_style(rgb):
+    """Photo or drawing? A drawing uses few distinct colours and has hard-edged shadows; a photo has thousands of tones and soft ones.
+    The shadow of a new shape imitates that style - pixelcut is an editor, it must not make a drawing look rendered."""
+    q = (rgb // 24).astype(np.int32)
+    key = q[..., 0] * 121 + q[..., 1] * 11 + q[..., 2]
+    used = np.bincount(key.ravel(), minlength=1331)
+    share = used / max(key.size, 1)
+    return "drawing" if int((share > .0005).sum()) < 260 else "photo"
 
 
 def swap_hair_layer(rgb, out, picked, region, base):
-    """The top layer (hair) next to and over the element is protected: pixels in the touched area that are clearly darker than the healed
-    surface and not element-coloured are hair. Returns (mask, opacity, hair colour): opacity says how much of each pixel is hair, so the
-    layer can lie over a NEW shape with the same see-through edges it had over the old one."""
+    """The top layer (hair) next to and over the element is protected: dark, not element-coloured pixels that are connected to the big dark
+    mass around. A strand tip reaching into the element is part of it. Returns (mask, opacity, hair colour): opacity says how much of each
+    pixel is hair, so the layer can lie over a NEW shape with the same see-through edges it had over the old one."""
     f = rgb.astype(np.float32)
     lum = lambda im: im[..., 0] * .299 + im[..., 1] * .587 + im[..., 2] * .114
-    zone = (cv2.dilate(region.astype(np.uint8), np.ones((5, 5), np.uint8)) > 0) & ~picked
-    dist = np.abs(f - base[None, None, :]).max(2)
-    hair = zone & (lum(f) < lum(out) - 55) & (lum(f) < 115) & (dist > 60)   # dark: hair, not a pink antialiased rim of the element
+    lf = lum(f)
+    cand = (lf < 105) & (np.abs(f - base[None, None, :]).max(2) > 60) & ((f[..., 0] - f[..., 1]) < 45)
+    n, lab, st, _ = cv2.connectedComponentsWithStats(cand.astype(np.uint8), connectivity=8)
+    big = [i for i in range(1, n) if st[i, cv2.CC_STAT_AREA] >= 60]
+    zone = (cv2.dilate(region.astype(np.uint8), np.ones((7, 7), np.uint8)) > 0)
+    hair = np.isin(lab, big) & zone
     if hair.sum() < 3:
         return np.zeros(picked.shape, bool), np.zeros(picked.shape, np.float32), None
-    colour = f[hair & (lum(f) <= np.percentile(lum(f)[hair], 40))].mean(0)
+    colour = f[hair & (lf <= np.percentile(lf[hair], 40))].mean(0)
     l_h = float(lum(colour[None, None, :])[0, 0])
-    opacity = np.clip((lum(out) - lum(f)) / np.maximum(lum(out) - l_h, 20.0), 0, 1) * hair
+    opacity = np.clip((lum(out) - lf) / np.maximum(lum(out) - l_h, 20.0), 0, 1) * hair
     return hair, opacity.astype(np.float32), colour
 
 
@@ -1249,11 +1397,12 @@ def cmd_swap(a):
     if a.grow:
         region = cv2.dilate(picked.astype(np.uint8), cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (2 * a.grow + 1,) * 2)) > 0
     base_col = rgb[picked].astype(np.float32).mean(0)
-    out, region, occ, soft, strand, level, score = swap_remove(rgb, picked, region, base_col)   # tries several strand strengths and keeps the best
+    out, region, occ, soft, strand, level, score, cov_a, cov_h = swap_remove(rgb, picked, region, base_col)   # tries several strand strengths and keeps the best
     hair, hair_a, hair_c = swap_hair_layer(rgb, out, picked, region, base_col)
     out = np.where(hair[:, :, None], rgb.astype(np.float32), out)   # the top layer (hair) is never changed
     ys, xs = np.nonzero(region)
     x0, x1, y0, y1 = xs.min(), xs.max(), ys.min(), ys.max()
+    style = swap_style(rgb)
     surf = swap_surface(out, region, (x0, y0, x1, y1))         # analysis first: flat 2D picture or a surface with 3D shading?
     if a.cut:
         layer = np.zeros((h, w, 4), np.uint8)
@@ -1261,8 +1410,17 @@ def cmd_swap(a):
         layer[:, :, 3] = region.astype(np.uint8) * 255
         save_atomic(Image.fromarray(layer[y0:y1 + 1, x0:x1 + 1], "RGBA"), a.cut)
     note = ""
+    cast_fit = swap_cast_fit(rgb, picked, occ)
+    cast = np.zeros((h, w), np.float32)                        # the cover's shadow as a soft mask, drawn the same way onto whatever lies below
+    shadow_px = np.zeros((h, w), bool)
+    if cast_fit is not None:
+        cv_, cl_, cs_ = cast_fit
+        cover_in = occ & (cv2.dilate(picked.astype(np.uint8), np.ones((5, 5), np.uint8)) > 0)
+        cast = swap_sweep(cover_in, cv_, cl_) * (1 - occ.astype(np.float32))
+        shadow_px = picked & ~occ & (cast > .5)
+    shade_core = picked & ~occ & ~shadow_px                    # the element's own shading, without the shadow the cover put on it
     if a.shape != "none":
-        meas = swap_measure(rgb, out, picked, region)
+        meas = swap_measure(rgb, out, shade_core, region)
         bw, bh = x1 - x0 + 1, y1 - y0 + 1
         shape_a = np.zeros((h, w), np.float32)
         if surf is None or a.flat_surface:
@@ -1277,15 +1435,27 @@ def cmd_swap(a):
                 sys.exit("error: --colour must look like #rrggbb")
         paint = np.zeros((h, w, 3), np.float32)
         paint[:] = colour
+        facet = None
+        if not a.flat:                                         # a gentle bevel: edges facing the light are a little brighter, edges facing away a little darker
+            hgt = cv2.distanceTransform((shape_a > .5).astype(np.uint8), cv2.DIST_L2, 3)
+            hgt = np.minimum(hgt / max(.28 * min(bw, bh), 1.0), 1.0)
+            hgt = cv2.GaussianBlur(hgt, (0, 0), max(.6, min(bw, bh) / 28))
+            gy_, gx_ = np.gradient(hgt)
+            lx, ly = -float(meas["dir"][0]), -float(meas["dir"][1])          # light comes from the side the shadow does not fall to
+            bevel = np.clip((gx_ * lx + gy_ * ly) * -max(bw, bh) * .9, -1, 1)
+            facet = 1.0 + .06 * bevel * (hgt < .6)      # only at the edge, and weak: the shape is red up to the cover, the shadow comes after it
         if not a.flat:                                         # the new shape gets the original's shading
-            shade = cv2.resize(meas["shade"], (bw, bh), interpolation=cv2.INTER_LINEAR)
+            shade = meas["shade_abs"][y0:y1 + 1, x0:x1 + 1]    # by position, not stretched: a shadow that fell on the old element (the strand's) falls on the new one at the same place
             paint[y0:y1 + 1, x0:x1 + 1] = np.clip(colour[None, None, :] * shade[:, :, None], 0, 255)
+        if cast_fit is not None:                               # the cover's shadow on the new shape: starts at the cover's edge, runs the measured way and length
+            paint = paint * (1 - cast_fit[2] * cast)[:, :, None]
+            paint = np.clip(paint * facet[:, :, None], 0, 255)
         if meas["outline"] is not None and not a.flat:         # ... and its outline: a rim of the same colour and ~1 px width
             inner = cv2.erode(shape_a, np.ones((3, 3), np.uint8))
             rimw = np.clip(shape_a - inner, 0, 1)
             paint = paint * (1 - rimw[:, :, None] * .8) + meas["outline"][None, None, :] * (rimw[:, :, None] * .8)
         vx_s, vy_s = float(meas["dir"][0]), float(meas["dir"][1])
-        strength = a.shadow if a.shadow is not None else min(max(meas["shadow"] * 3, .12), .45)
+        strength = a.shadow if a.shadow is not None else min(max(meas["shadow"] * 2, .12), .3)
         if strength > 0:                                       # a tight contact shadow plus a wider soft one, in the measured direction
             scale = max(bw, bh) / 16.0
             vx, vy = float(meas["dir"][0]), float(meas["dir"][1])
@@ -1295,25 +1465,30 @@ def cmd_swap(a):
                 return cv2.GaussianBlur(cv2.warpAffine(shape_a, m, (w, h)), (0, 0), max(.5, blur))
             sh = 1 - (1 - .55 * shifted(.6 * scale + .4, .8)) * (1 - .45 * shifted(2.0 * scale + .6, 2.6))
             sh = np.clip(sh * strength * 1.6, 0, .85) * (1 - shape_a)
+            if style == "drawing":                             # a drawn shadow has a clear edge: step it, keep the measured strength
+                sh = np.clip((sh / max(float(sh.max()), 1e-3) - .3) / .12, 0, 1) * float(sh.max()) * (1 - shape_a)
             out = out * (1 - .55 * sh[:, :, None])             # multiply: the surface below gets darker but keeps its own colour and texture
         out = out * (1 - shape_a[:, :, None]) + paint * shape_a[:, :, None]
         top = soft[:, :, None]                                 # ... and lies on top of the new shape again
         out = out * (1 - top) + strand * top
+        if cov_h is not None:
+            out = out * (1 - cov_a[:, :, None]) + cov_h[None, None, :] * cov_a[:, :, None]   # the translucent cover over the NEW shape too
         if hair_c is not None:                                 # hair over the new shape: see-through at its edges exactly as before, solid where it was solid
             ha = hair_a[:, :, None]
             over = np.where(ha > .9, rgb.astype(np.float32), out * (1 - ha) + hair_c[None, None, :] * ha)
             out = np.where(hair[:, :, None], over, out)
-        caster = np.maximum(occ.astype(np.float32), hair_a)    # everything on the hair layer throws a faint shadow onto the new shape, like onto the old one
-        cast = cv2.GaussianBlur(cv2.warpAffine(caster, np.float32([[1, 0, vx_s * 2.0], [0, 1, vy_s * 2.0]]), (w, h)), (0, 0), 1.0)
-        out = out * (1 - (.22 * cast * shape_a * (1 - np.clip(caster, 0, 1)))[:, :, None])
         note = ", new %s (shading%s%s, shadow %.0f%%)" % (a.shape, " kept" if not a.flat else " off", " + outline" if meas["outline"] is not None and not a.flat else "", strength * 100)
         note += "; surface: " + ("flat" if surf is None or a.flat_surface else "curved (%s, tilt %.0f%%) - shape bent to follow it" % ("convex" if surf["bulge"] > .03 else "concave" if surf["bulge"] < -.03 else "tilted", surf["tilt"] * 100))
+    if a.shape == "none":                                      # taken out: the shadow the cover threw on the element now falls on the surface below, as a subtle darkening of the surface
+        if cast_fit is not None:
+            dark = cast * cast_fit[2] * .6 * (picked & ~hair & ~occ)
+            out = out * (1 - dark)[:, :, None]
     save_atomic(Image.fromarray(np.clip(out, 0, 255).round().astype(np.uint8)), a.output)
     changed = (np.clip(out, 0, 255).round().astype(np.uint8) != rgb).any(2)
     cy, cx = np.nonzero(changed)
     area = "" if len(cx) == 0 else " in a %dx%d px area" % (cx.max() - cx.min() + 1, cy.max() - cy.min() + 1)
     look = "flat 2D picture, no 3D shading to follow" if surf is None else "3D surface (%s, tilt %.0f%%): shading and curvature are followed" % ("convex" if surf["bulge"] > .03 else "concave" if surf["bulge"] < -.03 else "tilted", surf["tilt"] * 100)
-    print("analysis: %s; %s" % (look, ("depth: %d px lie in front of the element and stay in front" % int(occ.sum())) if occ.any() else "depth: nothing lies in front of the element"))
+    print("analysis: %s; style: %s (%s shadows); %s" % (look, style, "hard-edged" if style == "drawing" else "soft", ("depth: %d px lie in front of the element and stay in front" % int(occ.sum())) if occ.any() else "depth: nothing lies in front of the element"))
     print("wrote %s (picked %d px at %s, tolerance %d%s)" % (a.output, int(picked.sum()), a.at, t, note))
     print("check: %d of %d pixels changed%s, the rest (%.2f%%) is identical to the original" % (int(changed.sum()), h * w, area, 100 * (1 - changed.mean())))
 

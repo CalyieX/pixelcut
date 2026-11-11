@@ -21,6 +21,10 @@ Gebaut von K&K AI. Entstanden bei einer Handy-App: Ein Comic-Bild sollte zum Men
 
 ![Zerlegtes Zeichenbild](examples/split_preview.png)
 
+**Sag deiner KI: "Tausche das Herz gegen ein Karo."** pixelcut führt den Befehl aus (`swap`) und lässt Schattierung, Strähne und Schatten, wo sie waren:
+
+![Herz entfernt, Karo eingesetzt](examples/swap_showcase.png)
+
 ---
 
 ## Die Idee in drei Sätzen
@@ -271,7 +275,7 @@ pip install -e ".[test]"
 pytest -q
 ```
 
-233 Tests. Sie prüfen die gespeicherten Dateien: Rundlauf split + join ist exakt (Zeichnung, Foto, gerade und Zickzack), die Teile überlappen nicht, Polygone, Winkel, Mitte, Größe und dickster Punkt stimmen mit den Teilen überein, `compare`, `key` und `alpha` rechnen richtig, `join` verweigert fehlende oder falsch große Teile, `split` fasst fremde Dateien nicht an, und schlechte Eingaben ergeben eine klare Fehlerzeile. Eingebaute Fehler (Mutationen) werden gefangen.
+234 Tests. Sie prüfen die gespeicherten Dateien: Rundlauf split + join ist exakt (Zeichnung, Foto, gerade und Zickzack), die Teile überlappen nicht, Polygone, Winkel, Mitte, Größe und dickster Punkt stimmen mit den Teilen überein, `compare`, `key` und `alpha` rechnen richtig, `join` verweigert fehlende oder falsch große Teile, `split` fasst fremde Dateien nicht an, und schlechte Eingaben ergeben eine klare Fehlerzeile. Eingebaute Fehler (Mutationen) werden gefangen.
 
 ---
 

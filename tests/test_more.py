@@ -1226,7 +1226,7 @@ def _crashed_aside(folder, dests_names, installing=True, committed=False, dests_
     aside.mkdir()
     (aside / "lock").write_bytes(b"1")
     dests = dests_override or [str((folder / n).resolve()) for n in dests_names]
-    (aside / "publish.json").write_text(_json.dumps({"dests": dests}))
+    (aside / "publish.json").write_text(_json.dumps({"dests": dests, "sizes": [len(b"NEW-" + n.encode()) for n in dests_names]}))
     for i, n in enumerate(dests_names):
         (aside / str(i)).write_bytes(b"OLD-" + n.encode())
         (folder / n).write_bytes(b"NEW-" + n.encode())
@@ -1939,7 +1939,7 @@ def test_swap_sets_a_shape_with_a_shadow_that_only_darkens_the_surface_beside_it
     pixelcut.swap(tmp_path / "s.png", tmp_path / "shaded.png", at=(45, 35), shape="diamond", shadow=.8, colour="#0000ff")
     p = np.array(Image.open(tmp_path / "plain.png").convert("RGB")).astype(int)
     s = np.array(Image.open(tmp_path / "shaded.png").convert("RGB")).astype(int)
-    assert tuple(p[36, 46]) == (0, 0, 255) and tuple(s[36, 46]) == (0, 0, 255)             # the shape itself is the same
+    assert np.abs(p[36, 46] - [0, 0, 255]).max() <= 12 and (p[36, 46] == s[36, 46]).all()   # the shape itself is the same (bevel allowed)
     assert (s <= p).all() and (s < p).any()                                                 # the shadow only darkens
     low_right = s[42:48, 50:56].sum() - p[42:48, 50:56].sum()
     up_left = s[24:30, 36:42].sum() - p[24:30, 36:42].sum()
@@ -2042,3 +2042,85 @@ def test_swap_reports_no_depth_layer_when_nothing_is_in_front(tmp_path):
     _swap_picture(tmp_path)
     r = cli("swap", tmp_path / "s.png", tmp_path / "o.png", "--at", "45,35")
     assert "analysis:" in r.stdout and "nothing lies in front" in r.stdout
+
+
+def test_swap_tells_a_cover_from_a_shadow_by_itself_on_a_picture_it_has_never_seen(tmp_path):
+    """Opaque cover (dull colour of its own) stays as it was; the element's own shadow (same saturation, only darker) is not kept as a line."""
+    import pixelcut
+    img = np.full((90, 110, 3), (246, 226, 224), np.uint8)
+    img[30:62, 30:62] = (30, 160, 70)                            # a green square, not a heart: nothing here is tuned to one picture
+    for i in range(32):                                          # its own shadow: a darker green diagonal band (same saturation)
+        img[30 + i, max(30, 62 - i - 3):62 - i] = (10, 95, 40)
+    cover = np.zeros((90, 110), bool)
+    for i in range(40):                                          # opaque dull violet-grey strand across it and out of it
+        cover[26 + i, 70 - i] = True
+    img[cover] = (88, 80, 96)
+    Image.fromarray(img).save(tmp_path / "g.png")
+    pixelcut.swap(tmp_path / "g.png", tmp_path / "o.png", at=(37, 37))
+    out = np.array(Image.open(tmp_path / "o.png").convert("RGB")).astype(int)
+    shadow_px = np.zeros((90, 110), bool)
+    for i in range(32):
+        shadow_px[30 + i, max(30, 62 - i - 3):62 - i] = True
+    shadow_px &= ~cover
+    sat = (out.max(2) - out.min(2)) / np.maximum(out.max(2), 1)
+    assert (sat[shadow_px] < .35).all()                          # no green shadow line is left behind
+    inside = cover & (np.arange(90)[:, None] >= 30) & (np.arange(90)[:, None] < 62) & (np.arange(110)[None, :] >= 30) & (np.arange(110)[None, :] < 62)
+    assert (out[inside] == img[inside]).mean() > .9              # the strand over the element is still the original
+
+
+def test_recovery_repeated_after_a_kill_keeps_restored_originals(tmp_path):
+    import pixelcut
+    d = tmp_path
+    aside = _crashed_aside(d, ["a.png", "b.png"])
+    real = pixelcut.os.replace
+    calls = []
+
+    def killing(src, dst, *a, **k):
+        r = real(src, dst, *a, **k)
+        if Path(src).parent == aside:
+            calls.append(src)
+            if len(calls) == 1:
+                raise KeyboardInterrupt                      # hard stop right after the first original was put back
+        return r
+    pixelcut.os.replace = killing
+    try:
+        try:
+            pixelcut.recover_publish(d)
+        except KeyboardInterrupt:
+            pass
+    finally:
+        pixelcut.os.replace = real
+    pixelcut.recover_publish(d)                              # the repeat must not delete what the first pass restored
+    assert (d / "a.png").read_bytes() == b"OLD-a.png" and (d / "b.png").read_bytes() == b"OLD-b.png"
+    assert not aside.exists()
+
+
+def test_recovery_never_deletes_foreign_folders_or_unrelated_files(tmp_path):
+    import json as _json
+    import pixelcut
+    foreign = tmp_path / ".pixelcut_foreign"
+    foreign.mkdir()
+    (foreign / "publish.json").write_text("{broken")
+    (foreign / "family.txt").write_text("mine")
+    only_tmp = tmp_path / ".pixelcut_tmp"
+    only_tmp.mkdir()
+    (only_tmp / "publish.json.tmp").write_text("x")
+    note = tmp_path / ".pixelcut_note"
+    note.mkdir()
+    (note / "publish.json").write_text("{broken")           # our own half-written note and nothing else: may go
+    pixelcut.recover_publish(tmp_path)
+    assert (foreign / "family.txt").read_text() == "mine" and (foreign / "publish.json").exists()
+    assert not only_tmp.exists() and not note.exists()
+    victim = tmp_path / "family.txt"
+    victim.write_text("keep")
+    forged = tmp_path / ".pixelcut_forged"
+    forged.mkdir()
+    (forged / "publish.json").write_text(_json.dumps({"dests": [str(victim.resolve())]}))
+    (forged / "installing").write_text("1")
+    pixelcut.recover_publish(tmp_path)
+    assert victim.read_text() == "keep"                     # a note without matching sizes never deletes
+    forged.mkdir(exist_ok=True)
+    (forged / "publish.json").write_text(_json.dumps({"dests": [str(victim.resolve())], "sizes": [999]}))
+    (forged / "installing").write_text("1")
+    pixelcut.recover_publish(tmp_path)
+    assert victim.read_text() == "keep"                     # size differs: not the file that was installed
