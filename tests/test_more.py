@@ -2293,3 +2293,31 @@ def test_swap_reports_a_photon_check_for_the_shadow_it_found(tmp_path):
     Image.fromarray(img).save(tmp_path / "g.png")
     out = cli("swap", str(tmp_path / "g.png"), str(tmp_path / "o.png"), "--at", "37,37")
     assert "photon check: light from the" in out.stdout
+
+
+def test_a_briefly_blocked_commit_rename_is_retried(tmp_path):
+    import pixelcut
+    (tmp_path / "a.png").write_bytes(b"OLD-A")
+    (tmp_path / "a.new").write_bytes(b"NEW-A")
+    real = pixelcut.os.replace
+    fails = [2]
+
+    def flaky(src, dst, *a, **k):
+        if Path(dst).name.startswith(".pixelcut_gone_") and fails[0]:
+            fails[0] -= 1
+            raise PermissionError("a scanner holds a file")
+        return real(src, dst, *a, **k)
+    pixelcut.os.replace = flaky
+    try:
+        pixelcut.publish([(tmp_path / "a.new", tmp_path / "a.png")])
+    finally:
+        pixelcut.os.replace = real
+    assert (tmp_path / "a.png").read_bytes() == b"NEW-A" and fails[0] == 0
+
+
+def test_recovery_leaves_an_empty_pixelcut_folder_of_a_running_command_alone(tmp_path):
+    import pixelcut
+    scratch = tmp_path / ".pixelcut_running"
+    scratch.mkdir()                                          # e.g. another command's scratch folder, still empty
+    pixelcut.recover_publish(tmp_path)
+    assert scratch.is_dir()

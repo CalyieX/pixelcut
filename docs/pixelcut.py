@@ -33,7 +33,7 @@ import numpy as np
 from PIL import Image, ImageOps
 
 
-__version__ = "1.9.5"
+__version__ = "1.9.6"
 PART_NAME = re.compile(r"part_(0|[1-9]\d*)\.png")                  # exactly the names split writes: no leading zeros
 LOSSLESS = (".png", ".tif", ".tiff")
 
@@ -273,12 +273,7 @@ def recover_publish(folder, locked=True):
         except OSError:
             continue
         if not meta.is_file():
-            if locked and not names and d.name not in (DONE, ".pixelcut_old", ".pixelcut_new"):   # died right after mkdtemp: an empty shell
-                try:
-                    d.rmdir()
-                except OSError:
-                    pass
-            elif locked and list(names) == ["publish.json.tmp"]:   # died while writing its note: nothing in here to restore
+            if locked and list(names) == ["publish.json.tmp"]:   # died while writing its note: nothing in here to restore
                 _discard(d)
             continue
         if not locked:
@@ -1021,14 +1016,14 @@ def swap_shape_alpha(shape, w, h, size):
     return cv2.resize(mask, (w, h), interpolation=cv2.INTER_AREA).astype(np.float32) / 255
 
 
-def swap_heal(rgb, hole):
+def swap_heal(rgb, hole, apply=None):
     """Close `hole` (bool mask) from its surroundings. Structure-aware (Telea): a hair line or outline next to the hole continues
     into it instead of being smeared, smooth skin stays smooth. The radius follows the size of the hole."""
     hole_u = hole.astype(np.uint8)
     radius = max(2, int(round(hole.sum() ** .5 * .18)))
     bgr = cv2.cvtColor(np.ascontiguousarray(rgb), cv2.COLOR_RGB2BGR)
     fill = cv2.cvtColor(cv2.inpaint(bgr, hole_u, radius, cv2.INPAINT_TELEA), cv2.COLOR_BGR2RGB).astype(np.float32)
-    soft = cv2.GaussianBlur(cv2.dilate(hole_u, np.ones((3, 3), np.uint8)).astype(np.float32), (0, 0), 0.9)[:, :, None]
+    soft = cv2.GaussianBlur(cv2.dilate((hole if apply is None else apply).astype(np.uint8), np.ones((3, 3), np.uint8)).astype(np.float32), (0, 0), 0.9)[:, :, None]   # `apply`: only this part of the hole is written back (the rest was only kept out of the sources)
     return rgb.astype(np.float32) * (1 - soft) + fill * soft
 
 
@@ -1070,13 +1065,19 @@ def swap_add_tinted(rgb, region):
     ang = hue[core] * 2 * np.pi / 180
     mean_hue = (np.degrees(np.arctan2(np.sin(ang).mean(), np.cos(ang).mean())) % 360) / 2
     dh = np.abs((hue - mean_hue + 90) % 180 - 90)
-    cand = (dh < 14) & (sat > .28) & (val > .12)
-    near = cv2.dilate(region.astype(np.uint8), np.ones((9, 9), np.uint8)) > 0
+    cand = (dh < 14) & (sat > max(.28, .45 * float(sat[core].mean()))) & (val > .12)     # shade keeps most of the saturation; a pale surface of a nearby hue is no part of the element
+    ys0, xs0 = np.nonzero(region)
+    kk = max(9, int(max(xs0.max() - xs0.min() + 1, ys0.max() - ys0.min() + 1) * 2.0)) | 1                 # reaches over a strand to the other piece of the element
+    near = cv2.dilate(region.astype(np.uint8), np.ones((kk, kk), np.uint8)) > 0
     cand &= near
-    n, lab = cv2.connectedComponents((cand | region).astype(np.uint8), connectivity=8)
+    both = cand | region
+    ys_, xs_ = np.nonzero(region)
+    gap = max(3, int(max(xs_.max() - xs_.min() + 1, ys_.max() - ys_.min() + 1) * .3)) | 1            # a strand across the element is a gap of this width: pieces on both sides still belong together
+    bridged = cv2.morphologyEx(both.astype(np.uint8), cv2.MORPH_CLOSE, cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (min(max(gap, 7), 9),) * 2))
+    n, lab = cv2.connectedComponents(bridged, connectivity=8)
     keep = np.unique(lab[region])
-    grown = np.isin(lab, keep[keep > 0])
-    return grown if grown.sum() <= 2.5 * region.sum() else region
+    grown = np.isin(lab, keep[keep > 0]) & both
+    return grown if grown.sum() <= 5 * region.sum() else region
 
 
 def swap_measure(rgb, healed, core, region):
@@ -1315,7 +1316,12 @@ def swap_remove(rgb, picked, region0, base):
         region = region0 & ~occ
         if not region.any():
             continue
-        out = swap_heal(rgb, region | cv2.dilate(occ.astype(np.uint8), np.ones((5, 5), np.uint8)).astype(bool) | (cov > 0))   # the soft edge of the cover is no source for the surface below
+        lum_ = rgb[..., 0] * .299 + rgb[..., 1] * .587 + rgb[..., 2] * .114
+        dark = lum_ < 110
+        grown = lambda m, k: cv2.dilate(m.astype(np.uint8), np.ones((k, k), np.uint8)) > 0
+        base_hole = region | grown(occ, 5) | (cov > 0)
+        # hair next to the hole is no source for the skin below it: it is kept out of the sources (wide), but only the part right at the hole is rewritten
+        out = swap_heal(rgb, base_hole | (dark & grown(region, 15)), apply=region | (grown(occ, 5) & ~dark) | (cov > 0))
         strand, soft = swap_strand_pixels(rgb, out, occ & ~(cov > 0), picked)
         out = out * (1 - soft[:, :, None]) + strand * soft[:, :, None]
         if cov_h is not None:                                  # the cover over the element, translucent as before, now over the surface
@@ -1325,6 +1331,81 @@ def swap_remove(rgb, picked, region0, base):
         if best is None or sc < best[6] - 1e-4:
             best = (out, region, occ | (cov > 0), soft, strand, level, sc, cov, cov_h)
     return best
+
+
+def swap_strand_line(occ, on, shape, ss=8):
+    """A strand that crosses the element is a smooth thin line. Where it lay over the element the pixel estimate is ragged (stair steps, gaps),
+    so the line is REBUILT: its centre path is fitted through the strand pixels (the part outside the element guides the part over it),
+    its width follows the measured width, and it is drawn `ss` times finer and averaged down - clean edge, solid core, tapering end.
+    Returns coverage (0..1) over the picture or None when the strand is not a thin line."""
+    h, w = shape
+    n, lab = cv2.connectedComponents(occ.astype(np.uint8), connectivity=8)
+    near = cv2.dilate(on.astype(np.uint8), np.ones((5, 5), np.uint8)) > 0
+    ids = [i for i in range(1, n) if (near & (lab == i)).any()]
+    if not ids:
+        return None
+    ys, xs = np.nonzero(np.isin(lab, ids))
+    yo, xo = np.nonzero(on)
+    ext = (ys.max() - ys.min() + 1, xs.max() - xs.min() + 1)
+    swap_axes = ext[1] > ext[0]                                # mostly horizontal: work on the transposed picture
+    m = np.isin(lab, ids)
+    if swap_axes:
+        m = m.T
+        on_t = on.T
+        hh, ww = w, h
+    else:
+        on_t = on
+        hh, ww = h, w
+    yo, xo = np.nonzero(on_t)
+    ya, yb = yo.min(), yo.max()
+    rows = np.arange(max(ya - 14, 0), min(yb + 4, hh))
+    # the strand pixels that lie on the element say where the strand runs; in every row the pixel run nearest to that path is the strand
+    # (a hair lock next to it in the same row is not part of it)
+    on_rows = np.unique(yo)
+    c_on = np.array([np.nonzero(on_t[r])[0].mean() + .5 for r in on_rows])
+    p_on = np.polyfit(on_rows + .5, c_on, 1 if on_rows.size < 4 else 2)
+    cx, wd, ok = [], [], []
+    for r in rows:
+        xr = np.nonzero(m[r])[0]
+        if xr.size:
+            runs = np.split(xr, np.nonzero(np.diff(xr) > 1)[0] + 1)
+            pred = np.polyval(p_on, r + .5)
+            run = min(runs, key=lambda q: abs(q.mean() + .5 - pred))
+            if abs(run.mean() + .5 - pred) <= 3.5:
+                cx.append(run.mean() + .5); wd.append(float(run.size)); ok.append(True)
+                continue
+        cx.append(np.nan); wd.append(np.nan); ok.append(False)
+    cx, wd, ok = np.array(cx), np.array(wd), np.array(ok)
+    if ok.sum() < 5:
+        return None
+    med = float(np.median(wd[ok]))
+    ok = ok & (wd <= 1.6 * med)                                # rows where the strand runs into a hair lock are wider than the strand: they do not decide its path or width
+    if ok.sum() < 5:
+        return None
+    wd = np.minimum(wd, 1.3 * med)
+    r_ok = rows[ok] + .5
+    deg = 2 if ok.sum() >= 8 else 1
+    pc = np.polyfit(r_ok, cx[ok], deg)
+    if wd[ok].max() > 7:                                       # not a thin line (a blob or a thick hair lock): leave it to the pixel estimate
+        return None
+    wm = np.convolve(np.pad(wd[ok], 1, mode="edge"), np.ones(3) / 3, mode="valid")
+    wm = np.clip(wm, 1.0, 6.0)
+    r0, r1 = max(ya - 1, rows[0]), min(yb + 1, rows[-1])
+    ry = np.arange(r0, r1 + 1) + .5
+    xc = np.polyval(pc, ry)
+    ww_ = np.interp(ry, r_ok, wm)
+    left = np.stack([(xc - ww_ / 2) * ss, ry * ss], 1)
+    right = np.stack([(xc + ww_ / 2) * ss, ry * ss], 1)
+    poly = np.vstack([left, right[::-1]])
+    y0 = max(int(r0) - 3, 0); y1 = min(int(r1) + 4, hh)
+    x0 = max(int(min(left[:, 0].min(), right[:, 0].min()) / ss) - 3, 0); x1 = min(int(max(left[:, 0].max(), right[:, 0].max()) / ss) + 4, ww)
+    canvas = np.zeros(((y1 - y0) * ss, (x1 - x0) * ss), np.uint8)
+    pts = np.round(poly - np.array([x0 * ss, y0 * ss])).astype(np.int32)
+    cv2.fillPoly(canvas, [pts], 255)
+    cov = cv2.resize(canvas, (x1 - x0, y1 - y0), interpolation=cv2.INTER_AREA).astype(np.float32) / 255
+    full = np.zeros((hh, ww), np.float32)
+    full[y0:y1, x0:x1] = cov
+    return full.T.copy() if swap_axes else full
 
 
 def swap_strand_pixels(rgb, healed, occ, picked):
@@ -1365,8 +1446,23 @@ def swap_strand_pixels(rgb, healed, occ, picked):
                 soft[on] = np.maximum(full[on], .25 * a2[on])
         except Exception:                                      # not installed or the solver failed: keep the own estimate
             pass
-        sb = cv2.GaussianBlur(soft, (0, 0), .6)                  # smooth, not stair-stepped, where the cover was cut out of the element
-        soft[on] = sb[on]
+        # Sub-pixel edge: the opacity is a coverage estimate, its .5 level is where the edge runs. Drawn 4x finer as a sharp ramp one fine pixel
+        # wide and averaged back down, the strand keeps a solid core and a smooth one-pixel edge - no stair steps, no smear (distance-field /
+        # supersampling idea, cf. Green 2007 "Improved alpha-tested magnification", supersampling AA).
+        ss = 4
+        hh, ww = soft.shape
+        ys_, xs_ = np.nonzero(on)
+        y0, y1, x0, x1 = max(ys_.min() - 3, 0), min(ys_.max() + 4, hh), max(xs_.min() - 3, 0), min(xs_.max() + 4, ww)
+        part = np.maximum(soft[y0:y1, x0:x1], cv2.GaussianBlur(occ[y0:y1, x0:x1].astype(np.float32), (0, 0), .7) * (soft[y0:y1, x0:x1] > .12))   # a strand is as solid along its length as it is at its best spot: dotted opacity is estimation noise
+        hi = cv2.resize(part, ((x1 - x0) * ss, (y1 - y0) * ss), interpolation=cv2.INTER_CUBIC)
+        hi = np.clip((hi - .45) / (1.0 / ss * .9) + .5, 0, 1)
+        fine = cv2.resize(hi, (x1 - x0, y1 - y0), interpolation=cv2.INTER_AREA)
+        soft[y0:y1, x0:x1] = np.where(on[y0:y1, x0:x1], fine, part)
+        line = swap_strand_line(occ, on, soft.shape)
+        if line is not None:
+            zone = picked | on                                 # the rebuilt line also covers pixels of the element the pixel estimate had missed
+            soft[zone] = line[zone]
+            pix[zone & (line > 0)] = Hc[None, :]
     return pix, soft
 
 
