@@ -33,7 +33,7 @@ import numpy as np
 from PIL import Image, ImageOps
 
 
-__version__ = "1.9.3"
+__version__ = "1.9.4"
 PART_NAME = re.compile(r"part_(0|[1-9]\d*)\.png")                  # exactly the names split writes: no leading zeros
 LOSSLESS = (".png", ".tif", ".tiff")
 
@@ -175,6 +175,21 @@ def _sha(path):
     return h.hexdigest()
 
 
+def _discard(d):
+    """Throw a finished backup folder away: ONE rename to .pixelcut_gone_* first (the name alone says 'done'), then delete.
+    rmtree removes files in any order, so a kill in the middle of it must never leave a folder that still looks unfinished.
+    If the rename is not possible the folder is left alone (a leftover is harmless, a half-deleted note is not)."""
+    d = Path(d)
+    if not d.name.startswith(".pixelcut_gone_"):
+        gone = d.with_name(".pixelcut_gone_" + d.name[len(".pixelcut_"):])
+        try:
+            os.replace(d, gone)
+        except OSError:
+            return
+        d = gone
+    shutil.rmtree(d, ignore_errors=True)
+
+
 def _publish(pairs, held):
     import tempfile
     folder = Path(pairs[0][1]).resolve().parent
@@ -197,14 +212,13 @@ def _publish(pairs, held):
         for src, dest in pairs:
             installed.append(dest)                            # before the move: an abort in between must still clean up
             os.replace(src, dest)
-        (aside / "committed").write_text("1")                 # the new set is complete: a later run only removes the backup
         gone = aside.with_name(".pixelcut_gone_" + aside.name[len(".pixelcut_"):])
-        try:
-            os.replace(aside, gone)                           # ONE rename ends the transaction: rmtree deletes in any order and a kill in the middle must not leave a half-deleted note
-            aside = gone
-        except OSError:
-            pass
+        os.replace(aside, gone)                               # the commit point: ONE rename. Before it a recovery goes back to the old set, after it the new set stays
+        aside = gone
     except BaseException:
+        if not aside.exists():                                # the rename happened: committed, nothing may be undone any more
+            _discard(gone)
+            raise
         stuck = []
         for dest in installed:
             try:
@@ -223,9 +237,9 @@ def _publish(pairs, held):
         if stuck:                                             # never destroy the only copy: say where it is
             print("error: could not restore everything - your previous files are kept in %s\n  problem with: %s" % (aside, "; ".join(stuck)), file=sys.stderr)
         else:
-            shutil.rmtree(aside, ignore_errors=True)
+            _discard(aside)
         raise
-    shutil.rmtree(aside, ignore_errors=True)
+    _discard(aside)
 
 
 def recover_publish(folder, locked=True):
@@ -247,8 +261,13 @@ def recover_publish(folder, locked=True):
         except OSError:
             continue
         if not meta.is_file():
-            if locked and list(names) == ["publish.json.tmp"]:     # died while writing its note: nothing in here to restore
-                shutil.rmtree(d, ignore_errors=True)
+            if locked and not names and d.name not in (DONE, ".pixelcut_old", ".pixelcut_new"):   # died right after mkdtemp: an empty shell
+                try:
+                    d.rmdir()
+                except OSError:
+                    pass
+            elif locked and list(names) == ["publish.json.tmp"]:   # died while writing its note: nothing in here to restore
+                _discard(d)
             continue
         if not locked:
             print("note: %s may be the backup of an interrupted run, but this system cannot tell whether it is still running - left untouched" % d, file=sys.stderr)
@@ -259,7 +278,7 @@ def recover_publish(folder, locked=True):
             assert all(Path(x).resolve().parent == folder for x in dests)      # a renamed folder must not make us write elsewhere
         except (OSError, ValueError, KeyError, AssertionError):
             if names <= {"publish.json", "publish.json.tmp"}:   # only our own half-written note: nothing of anybody's in here
-                shutil.rmtree(d, ignore_errors=True)
+                _discard(d)
             else:
                 print("note: %s looks like a backup of an interrupted run but does not belong here - left untouched" % d, file=sys.stderr)
             continue
@@ -274,8 +293,9 @@ def recover_publish(folder, locked=True):
             committed = (d / "committed").read_text() == "1"                  # an empty file from a failed write does not count
         except OSError:
             committed = False
-        if committed:
-            pass
+        if committed:                                                             # written by older versions: the new set is complete
+            _discard(d)
+            continue
         else:
             if (d / "installing").exists() and not (d / "restoring").exists():
                 for i, x in enumerate(dests):                                  # only a file that is exactly the new one we installed (same content) is removed
@@ -302,7 +322,7 @@ def recover_publish(folder, locked=True):
             if left:
                 print("note: %s still holds backups that belong to no file in the list - kept" % d, file=sys.stderr)
         if not left:
-            shutil.rmtree(d, ignore_errors=True)
+            _discard(d)
 
 
 def refuse_inputs(inputs, outputs):
@@ -1445,6 +1465,18 @@ def cmd_swap(a):
         save_atomic(Image.fromarray(layer[y0:y1 + 1, x0:x1 + 1], "RGBA"), a.cut)
     note = ""
     cast_fit = swap_cast_fit(rgb, picked, occ)
+    photon = ""
+    if cast_fit is not None:                                   # photon check: the shadow falls away from the light, so the light comes from the other side - does the surface shading say the same?
+        light = -cast_fit[0]
+        where = ("top" if light[1] < -.5 else "bottom" if light[1] > .5 else "") + ("-left" if light[0] < -.5 and abs(light[1]) > .5 else "left" if light[0] < -.5 else "-right" if light[0] > .5 and abs(light[1]) > .5 else "right" if light[0] > .5 else "")
+        photon = "light from the %s (shadow falls away from it)" % (where.strip("-") or "front")
+        if surf is not None and surf["tilt"] > .08:
+            agree = float(np.dot(surf["dir"], light))
+            if agree < -.3:                                    # the surface is brighter on the OTHER side: the two measurements disagree - trust the shadow less
+                cast_fit = (cast_fit[0], cast_fit[1], cast_fit[2] * .6)
+                photon += "; the surface shading points the other way, shadow weakened"
+            else:
+                photon += "; the surface shading agrees"
     cast = np.zeros((h, w), np.float32)                        # the cover's shadow as a soft mask, drawn the same way onto whatever lies below
     shadow_px = np.zeros((h, w), bool)
     if cast_fit is not None:
@@ -1523,6 +1555,8 @@ def cmd_swap(a):
     area = "" if len(cx) == 0 else " in a %dx%d px area" % (cx.max() - cx.min() + 1, cy.max() - cy.min() + 1)
     look = "flat 2D picture, no 3D shading to follow" if surf is None else "3D surface (%s, tilt %.0f%%): shading and curvature are followed" % ("convex" if surf["bulge"] > .03 else "concave" if surf["bulge"] < -.03 else "tilted", surf["tilt"] * 100)
     print("analysis: %s; style: %s (%s shadows); %s" % (look, style, "hard-edged" if style == "drawing" else "soft", ("depth: %d px lie in front of the element and stay in front" % int(occ.sum())) if occ.any() else "depth: nothing lies in front of the element"))
+    if photon:
+        print("photon check: " + photon)
     print("wrote %s (picked %d px at %s, tolerance %d%s)" % (a.output, int(picked.sum()), a.at, t, note))
     print("check: %d of %d pixels changed%s, the rest (%.2f%%) is identical to the original" % (int(changed.sum()), h * w, area, 100 * (1 - changed.mean())))
 

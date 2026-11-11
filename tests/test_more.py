@@ -2170,3 +2170,126 @@ def test_recovery_does_not_overwrite_what_is_there_and_ignores_odd_slot_names(tm
     (d / "a.png").unlink()                                  # the old file was moved aside, nothing is there now
     pixelcut.recover_publish(d)
     assert (d / "a.png").read_bytes() == b"OLD-a.png"
+
+
+def _publish_with_kill(tmp_path, kill_at):
+    """publish two files; the Nth os.replace/unlink/rmtree call raises KeyboardInterrupt (a hard stop). Returns the call count."""
+    import pixelcut
+    (tmp_path / "a.png").write_bytes(b"OLD-A")
+    (tmp_path / "b.png").write_bytes(b"OLD-B")
+    (tmp_path / "a.new").write_bytes(b"NEW-A")
+    (tmp_path / "b.new").write_bytes(b"NEW-B")
+    names = ("replace", "unlink", "rmdir")
+    real = {n: getattr(pixelcut.os, n) for n in ("replace", "unlink", "rmdir")}
+    real_rmtree = pixelcut.shutil.rmtree
+    count = [0]
+
+    def wrap(fn):
+        def inner(*a, **k):
+            count[0] += 1
+            if count[0] == kill_at:
+                raise KeyboardInterrupt
+            return fn(*a, **k)
+        return inner
+
+    def tree(path, *a, **k):
+        count[0] += 1
+        if count[0] == kill_at:                              # dies after removing the first entry only
+            for f in sorted(Path(path).iterdir())[:1]:
+                f.unlink()
+            raise KeyboardInterrupt
+        return real_rmtree(path, *a, **k)
+    for n in names:
+        setattr(pixelcut.os, n, wrap(real[n]))
+    pixelcut.shutil.rmtree = tree
+    try:
+        try:
+            pixelcut.publish([(tmp_path / "a.new", tmp_path / "a.png"), (tmp_path / "b.new", tmp_path / "b.png")])
+        except KeyboardInterrupt:
+            pass
+    finally:
+        for n in names:
+            setattr(pixelcut.os, n, real[n])
+        pixelcut.shutil.rmtree = real_rmtree
+    return count[0]
+
+
+def test_two_hard_stops_in_a_row_never_lose_both_sets(tmp_path):
+    import pixelcut
+    (tmp_path / "probe").mkdir()
+    total = _publish_with_kill(tmp_path / "probe", 10 ** 6)
+    assert total > 5
+    for first in range(1, total + 1):
+        for second in (1, 2, 3, 4, 5, 6):
+            d = tmp_path / ("r%d_%d" % (first, second))
+            d.mkdir()
+            _publish_with_kill(d, first)
+            import pixelcut as pc
+            real = {n: getattr(pc.os, n) for n in ("replace", "unlink", "rmdir")}
+            real_rmtree = pc.shutil.rmtree
+            n = [0]
+
+            def wrap(fn):
+                def inner(*a, **k):
+                    n[0] += 1
+                    if n[0] == second:
+                        raise KeyboardInterrupt
+                    return fn(*a, **k)
+                return inner
+
+            def tree(path, *a, **k):
+                n[0] += 1
+                if n[0] == second:
+                    for f in sorted(Path(path).iterdir())[:1]:
+                        f.unlink()
+                    raise KeyboardInterrupt
+                return real_rmtree(path, *a, **k)
+            for name in real:
+                setattr(pc.os, name, wrap(real[name]))
+            pc.shutil.rmtree = tree
+            try:
+                try:
+                    pc.recover_publish(d)
+                except KeyboardInterrupt:
+                    pass
+            finally:
+                for name in real:
+                    setattr(pc.os, name, real[name])
+                pc.shutil.rmtree = real_rmtree
+            pc.recover_publish(d)
+            got = ((d / "a.png").read_bytes() if (d / "a.png").exists() else None, (d / "b.png").read_bytes() if (d / "b.png").exists() else None)
+            assert got in ((b"OLD-A", b"OLD-B"), (b"NEW-A", b"NEW-B")), (first, second, got)
+
+
+def test_a_failed_commit_rename_goes_back_to_the_old_set(tmp_path):
+    import pixelcut
+    (tmp_path / "a.png").write_bytes(b"OLD-A")
+    (tmp_path / "a.new").write_bytes(b"NEW-A")
+    real = pixelcut.os.replace
+
+    def failing(src, dst, *a, **k):
+        if Path(dst).name.startswith(".pixelcut_gone_"):
+            raise OSError("no rename today")
+        return real(src, dst, *a, **k)
+    pixelcut.os.replace = failing
+    try:
+        try:
+            pixelcut.publish([(tmp_path / "a.new", tmp_path / "a.png")])
+        except OSError:
+            pass
+    finally:
+        pixelcut.os.replace = real
+    assert (tmp_path / "a.png").read_bytes() == b"OLD-A"
+
+
+def test_swap_reports_a_photon_check_for_the_shadow_it_found(tmp_path):
+    """The light direction follows from the shadow's direction; the swap says which side the light comes from."""
+    img = np.full((90, 110, 3), (246, 226, 224), np.uint8)
+    img[30:62, 30:62] = (30, 160, 70)
+    for i in range(32):
+        img[30 + i, max(30, 62 - i - 3):62 - i] = (10, 95, 40)
+    for i in range(40):
+        img[26 + i, 70 - i] = (88, 80, 96)
+    Image.fromarray(img).save(tmp_path / "g.png")
+    out = cli("swap", str(tmp_path / "g.png"), str(tmp_path / "o.png"), "--at", "37,37")
+    assert "photon check: light from the" in out.stdout
