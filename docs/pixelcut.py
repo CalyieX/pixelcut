@@ -33,7 +33,7 @@ import numpy as np
 from PIL import Image, ImageOps
 
 
-__version__ = "1.9.7"
+__version__ = "1.9.8"
 PART_NAME = re.compile(r"part_(0|[1-9]\d*)\.png")                  # exactly the names split writes: no leading zeros
 LOSSLESS = (".png", ".tif", ".tiff")
 
@@ -1307,7 +1307,10 @@ def swap_remove(rgb, picked, region0, base):
     """Take the element out. The strand lying over it is found at several strengths; each result is scored by swap_score and the best
     one is used - no per-picture tuning by the caller. Returns (out, region, occ, soft, strand, chosen level, score)."""
     rim = swap_rim(rgb, picked, region0, base)
-    keep = region0 & ~rim & (np.abs(rgb.astype(np.float32) - swap_heal(rgb, picked)).max(2) > 30)                                       # ring pixels that are NOT element rim (e.g. lit hair edge): healed around, then put back as they were
+    f_ = rgb.astype(np.float32)
+    sat_ = (f_.max(2) - f_.min(2)) / np.maximum(f_.max(2), 1.0)
+    objlike = sat_ >= .6 * float(np.median(sat_[picked]))                                   # saturated like the element = its own darker part (shade), never a structure worth keeping
+    keep = region0 & ~rim & ~objlike & (np.abs(rgb.astype(np.float32) - swap_heal(rgb, picked)).max(2) > 30)                                       # ring pixels that are NOT element rim (e.g. lit hair edge): healed around, then put back as they were
     best = None
     for level in (None, 99, 95, 85, 70, 50):
         occ = swap_occluders(rgb, picked, level)
@@ -1529,7 +1532,9 @@ def swap_hair_layer(rgb, out, picked, region, base):
     f = rgb.astype(np.float32)
     lum = lambda im: im[..., 0] * .299 + im[..., 1] * .587 + im[..., 2] * .114
     lf = lum(f)
-    cand = (lf < 105) & (np.abs(f - base[None, None, :]).max(2) > 60) & ((f[..., 0] - f[..., 1]) < 45)
+    sat_ = (f.max(2) - f.min(2)) / np.maximum(f.max(2), 1.0)
+    shade = sat_ >= .6 * float(np.median(sat_[picked]))                                      # as saturated as the element: its own darker part, not hair
+    cand = (lf < 105) & (np.abs(f - base[None, None, :]).max(2) > 60) & ((f[..., 0] - f[..., 1]) < 45) & ~shade
     n, lab, st, _ = cv2.connectedComponentsWithStats(cand.astype(np.uint8), connectivity=8)
     big = [i for i in range(1, n) if st[i, cv2.CC_STAT_AREA] >= 60]
     zone = (cv2.dilate(region.astype(np.uint8), np.ones((7, 7), np.uint8)) > 0)

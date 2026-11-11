@@ -54,28 +54,36 @@ def strand_mask(h, w, cx, cy, r, ang, wid):
     return cv2.resize(m, (w, h), interpolation=cv2.INTER_AREA).astype(np.float32) / 255, d
 
 
-def make_case(kind, shp, r, seed):
+def make_case(kind, shp, r, seed, multi=False):
     rng = np.random.default_rng(seed)
     size = int(r * 5)
     h, w = int(size * .9), size
     cx, cy = w * .5 + rng.uniform(-r * .2, r * .2), h * .5 + rng.uniform(-r * .2, r * .2)
     bg = background(kind, h, w, rng)
-    obj_col = [np.array([236, 60, 90]), np.array([60, 110, 220]), np.array([60, 170, 90])][seed % 3].astype(np.float32)
+    palette = [(236, 60, 90), (60, 110, 220), (60, 170, 90), (230, 190, 40), (150, 80, 200)]            # Farbe, Winkel, Strahenfarbe, Grundhelligkeit, Schattenstaerke: je eigene Zufallszahl, nichts an Radius/Seed gekoppelt
+    obj_col = np.array(palette[rng.integers(len(palette))], np.float32)
+    dark_bg = rng.random() < .25
+    if dark_bg:
+        bg = bg * .38                                                                                       # dunkler Grund
     om = shape_mask(shp, h, w, cx, cy, r)
-    ang = math.radians(rng.uniform(55, 125)) if seed % 2 else math.radians(rng.uniform(-125, -55))
+    ang = math.radians(rng.uniform(0, 180))
     sm, d = strand_mask(h, w, cx + rng.uniform(-r * .15, r * .15), cy, r, ang, max(1.6, r / 10))
-    strand_col = np.array([70, 50, 56], np.float32)
+    if multi:
+        sm2, _ = strand_mask(h, w, cx + r * .55 * (1 if rng.random() < .5 else -1), cy, r, ang + math.radians(rng.uniform(-18, 18)), max(1.6, r / 10))
+        sm = np.maximum(sm, sm2)
+    strand_col = np.array([232, 222, 214], np.float32) if dark_bg else np.array([70, 50, 56], np.float32)   # Straehne hebt sich immer vom Grund ab: helle auf dunklem, dunkle auf hellem Grund
+    shadow_k = rng.uniform(.2, .55)
     # Schatten der Straehne auf dem Objekt: Straehne nach rechts-unten geschoben, nur auf dem Objekt, dunkler
     M = np.float32([[1, 0, r / 5], [0, 1, r / 8]])
     shifted = cv2.warpAffine(sm, M, (w, h))
     sh = shifted * (1 - sm) * om
     truth = bg * (1 - sm[..., None]) + strand_col * sm[..., None]
     img = bg * (1 - om[..., None]) + obj_col * om[..., None]
-    img = img * (1 - .38 * sh[..., None])
+    img = img * (1 - shadow_k * sh[..., None])
     img = img * (1 - sm[..., None]) + strand_col * sm[..., None]
     ys, xs = np.nonzero((om > .99) & (sm < .01) & (shifted < .01))
     j = len(xs) // 2
-    return (np.clip(img, 0, 255).round().astype(np.uint8), np.clip(truth, 0, 255).round().astype(np.uint8), om, sm, (int(xs[j]), int(ys[j])))
+    return (np.clip(img, 0, 255).round().astype(np.uint8), np.clip(truth, 0, 255).round().astype(np.uint8), om, sm, (int(xs[j]), int(ys[j])), np.clip(bg, 0, 255))
 
 
 def run_swap(path_in, path_out, at):
@@ -105,7 +113,7 @@ def edge_width(sa):
     return float(((sa > .1) & (sa < .9)).sum()) / max(L, 1)
 
 
-def measure(img, truth, out, om, sm):
+def measure(img, truth, out, om, sm, bg):
     hole = cv2.dilate((om > .02).astype(np.uint8), np.ones((5, 5), np.uint8)) > 0
     far = ~(cv2.dilate(hole.astype(np.uint8), np.ones((25, 25), np.uint8)) > 0)
     res = {"outside_changed": int((out != img)[far].any(-1).sum())}
@@ -115,14 +123,14 @@ def measure(img, truth, out, om, sm):
     res["dE_hole_p95"] = float(np.percentile(de[hm], 95)) if hm.any() else 0.0
     ocol = np.linalg.norm(lab(img) - lab(truth), axis=2)
     res["residual"] = float(((de > 12) & (ocol > 12) & hm).sum() / max(hm.sum(), 1))
-    lum = lambda a: a[..., 0] * .299 + a[..., 1] * .587 + a[..., 2] * .114
     zone = (cv2.dilate((om > .02).astype(np.uint8), np.ones((3, 3), np.uint8)) > 0)
-    got = (lum(out.astype(np.float32)) < 120) & zone
+    # Straehne = Abstand zum Grund ohne Straehne (unabhaengig von heller/dunkler Straehne und Grundhelligkeit)
+    dist = lambda a: np.abs(a.astype(np.float32) - bg.astype(np.float32)).max(2)
+    got = (dist(out) > 40) & zone
     ref = (sm > .5) & zone
     res["strand_iou"] = float((got & ref).sum() / max((got | ref).sum(), 1))
-    # Kantenbreite der Straehne: nur dort messen, wo die Wahrheit die Straehne hat (Textur im Foto zaehlt nicht als Kante); Deckkraft aus dem Dunkelwert
-    base = lum(truth.astype(np.float32))
-    sa = np.clip((np.median(base[zone & (sm < .02)]) - lum(out.astype(np.float32))) / max(np.median(base[zone & (sm < .02)]) - 60, 1), 0, 1)
+    full = max(float(np.percentile(dist(truth)[sm > .5], 90)) if (sm > .5).any() else 1.0, 20.0)
+    sa = np.clip(dist(out) / full, 0, 1)
     near_strand = cv2.dilate((sm > .02).astype(np.uint8), np.ones((5, 5), np.uint8)) > 0
     res["edge_px"] = edge_width(sa * (zone & near_strand))
     return res
@@ -134,37 +142,51 @@ def verdict(res):
             "edge_px": res["edge_px"] <= THRESH["edge_px"]}
 
 
+def wilson(k, n, z=1.96):
+    if n == 0:
+        return (0.0, 0.0)
+    p = k / n; d = 1 + z * z / n
+    c = (p + z * z / (2 * n)) / d; h = z * math.sqrt(p * (1 - p) / n + z * z / (4 * n * n)) / d
+    return (round(c - h, 2), round(c + h, 2))
+
+
 def main():
     ap = argparse.ArgumentParser(); ap.add_argument("--json"); ap.add_argument("--quick", action="store_true"); ap.add_argument("--twice", action="store_true")
+    ap.add_argument("--seeds", type=int, default=3, help="Zufallsziehungen je Zelle (Art x Form x Radius)"); ap.add_argument("--multi", action="store_true", help="zwei Straehnen")
     a = ap.parse_args()
     kinds = ("skin", "anime") if a.quick else ("skin", "photo", "anime", "flat")
     shapes = ("heart", "circle") if a.quick else ("heart", "circle", "square")
     radii = (12,) if a.quick else (10, 14, 24)
     rows, tmp = [], Path(tempfile.mkdtemp(prefix="swapbench_"))
-    seed = 0
+    seed = 1000
     for kind in kinds:
         for shp in shapes:
             for r in radii:
-                seed += 1
-                img, truth, om, sm, at = make_case(kind, shp, r, seed)
-                pin, pout = tmp / ("c%d.png" % seed), tmp / ("o%d.png" % seed)
-                Image.fromarray(img).save(pin)
-                out, log = run_swap(pin, pout, at)
-                name = "%s/%s/r%d" % (kind, shp, r)
-                if out is None:
-                    rows.append({"case": name, "error": str(log)[:90]}); print(name, "ERROR", str(log)[:90]); continue
-                res = measure(img, truth, out, om, sm)
-                if a.twice:
-                    out2, _ = run_swap(pin, tmp / ("o%da.png" % seed), at)
-                    res["deterministic"] = bool(out2 is not None and (out2 == out).all())
-                v = verdict(res)
-                res.update(case=name, passed=all(v.values()), failed=[k for k, ok in v.items() if not ok])
-                rows.append(res)
-                print("%-22s dE %.1f/%.1f resid %.3f iou %.2f edge %.2f out %d %s" % (name, res["dE_hole_mean"], res["dE_hole_p95"], res["residual"], res["strand_iou"], res["edge_px"], res["outside_changed"], "OK" if res["passed"] else "FAIL " + ",".join(res["failed"])))
+                for k in range(a.seeds):
+                    seed += 1
+                    img, truth, om, sm, at, bg = make_case(kind, shp, r, seed, multi=a.multi)
+                    pin, pout = tmp / ("c%d.png" % seed), tmp / ("o%d.png" % seed)
+                    Image.fromarray(img).save(pin)
+                    out, log = run_swap(pin, pout, at)
+                    name = "%s/%s/r%d/s%d" % (kind, shp, r, seed)
+                    if out is None:
+                        rows.append({"case": name, "error": str(log)[:90]}); print(name, "ERROR", str(log)[:90]); continue
+                    res = measure(img, truth, out, om, sm, bg)
+                    if a.twice:
+                        out2, _ = run_swap(pin, tmp / ("o%da.png" % seed), at)
+                        res["deterministic"] = bool(out2 is not None and (out2 == out).all())
+                    v = verdict(res)
+                    res.update(case=name, passed=all(v.values()), failed=[k_ for k_, ok in v.items() if not ok])
+                    rows.append(res)
+                    print("%-26s dE %.1f/%.1f resid %.3f iou %.2f edge %.2f out %d %s" % (name, res["dE_hole_mean"], res["dE_hole_p95"], res["residual"], res["strand_iou"], res["edge_px"], res["outside_changed"], "OK" if res["passed"] else "FAIL " + ",".join(res["failed"])))
     ok = [r for r in rows if r.get("passed")]
-    print("\n%d von %d Faellen innerhalb der Schwellen" % (len(ok), len(rows)))
+    lo, hi = wilson(len(ok), len(rows))
+    print("\n%d von %d Faellen innerhalb der Schwellen (95%%-Intervall der Quote %.2f-%.2f)" % (len(ok), len(rows), lo, hi))
+    for rr in (10, 14, 24):
+        sub = [r for r in rows if "/r%d/" % rr in r["case"]]
+        print("  Radius %d: %d von %d" % (rr, sum(r.get("passed", False) for r in sub), len(sub)))
     if a.json:
-        Path(a.json).write_text(json.dumps({"version": pixelcut.__version__, "thresholds": THRESH, "rows": rows}, indent=1), encoding="utf-8")
+        Path(a.json).write_text(json.dumps({"version": pixelcut.__version__, "thresholds": THRESH, "seeds": a.seeds, "multi": a.multi, "rows": rows}, indent=1), encoding="utf-8")
 
 
 if __name__ == "__main__":
