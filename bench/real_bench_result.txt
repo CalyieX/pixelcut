@@ -45,3 +45,4 @@ rocket       heart  6001  FAIL  dE 1.6  verdict-ok True  SILENT
 rocket       circle 6001  FAIL  dE 2.8  verdict-ok True  SILENT
 
 44 Faelle: 7 innerhalb der Schwellen (0.08-0.29); ehrlich (kein verschwiegener Fehler): 39 (0.76-0.95); verschwiegen: 5
+V2 (Residuum mit 6 px Toleranz, deklariert 17.11.2026): 11 von 44 innerhalb (0.15-0.39); ehrlich 42 (0.85-0.99); verschwiegen 2 (beide rocket 6001: Farbrest auf Straehne in dunklem Grund)
