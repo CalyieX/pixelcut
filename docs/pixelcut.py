@@ -33,7 +33,7 @@ import numpy as np
 from PIL import Image, ImageOps
 
 
-__version__ = "1.9.9"
+__version__ = "1.9.10"
 PART_NAME = re.compile(r"part_(0|[1-9]\d*)\.png")                  # exactly the names split writes: no leading zeros
 LOSSLESS = (".png", ".tif", ".tiff")
 
@@ -1016,13 +1016,22 @@ def swap_shape_alpha(shape, w, h, size):
     return cv2.resize(mask, (w, h), interpolation=cv2.INTER_AREA).astype(np.float32) / 255
 
 
-def swap_heal(rgb, hole, apply=None):
+def swap_heal(rgb, hole, apply=None, hard=False):
     """Close `hole` (bool mask) from its surroundings. Structure-aware (Telea): a hair line or outline next to the hole continues
-    into it instead of being smeared, smooth skin stays smooth. The radius follows the size of the hole."""
+    into it instead of being smeared, smooth skin stays smooth. The radius follows the size of the hole.
+    hard=True (a drawing with flat colour areas): every hole pixel takes the colour of the nearest surrounding pixel, so an edge between two
+    flat areas stays an edge instead of becoming a blurred gradient."""
     hole_u = hole.astype(np.uint8)
     radius = max(2, int(round(hole.sum() ** .5 * .18)))
     bgr = cv2.cvtColor(np.ascontiguousarray(rgb), cv2.COLOR_RGB2BGR)
     fill = cv2.cvtColor(cv2.inpaint(bgr, hole_u, radius, cv2.INPAINT_TELEA), cv2.COLOR_BGR2RGB).astype(np.float32)
+    if hard and hole.any() and (~hole).any():
+        _, lab = cv2.distanceTransformWithLabels(hole_u, cv2.DIST_L2, 5, labelType=cv2.DIST_LABEL_PIXEL)
+        cols = np.zeros((int(lab.max()) + 1, 3), np.float32)
+        cols[lab[~hole]] = rgb[~hole].astype(np.float32)
+        nn = cols[lab]
+        nn = np.where(hole[:, :, None], cv2.GaussianBlur(nn, (0, 0), .8), nn)
+        fill = np.where(hole[:, :, None], nn, fill)
     soft = cv2.GaussianBlur(cv2.dilate((hole if apply is None else apply).astype(np.uint8), np.ones((3, 3), np.uint8)).astype(np.float32), (0, 0), 0.9)[:, :, None]   # `apply`: only this part of the hole is written back (the rest was only kept out of the sources)
     return rgb.astype(np.float32) * (1 - soft) + fill * soft
 
@@ -1065,7 +1074,7 @@ def swap_add_tinted(rgb, region):
     ang = hue[core] * 2 * np.pi / 180
     mean_hue = (np.degrees(np.arctan2(np.sin(ang).mean(), np.cos(ang).mean())) % 360) / 2
     dh = np.abs((hue - mean_hue + 90) % 180 - 90)
-    cand = (dh < 14) & (sat > max(.28, .45 * float(sat[core].mean()))) & (val > .12)     # shade keeps most of the saturation; a pale surface of a nearby hue is no part of the element
+    cand = (dh < 14) & (sat > max(.4, .6 * float(sat[core].mean()))) & (val > .15)     # shade keeps most of the saturation; a pale surface of a nearby hue is no part of the element
     ys0, xs0 = np.nonzero(region)
     kk = max(9, int(max(xs0.max() - xs0.min() + 1, ys0.max() - ys0.min() + 1) * 2.0)) | 1                 # reaches over a strand to the other piece of the element
     near = cv2.dilate(region.astype(np.uint8), np.ones((kk, kk), np.uint8)) > 0
@@ -1245,6 +1254,9 @@ def swap_occluders(rgb, picked, level=95):
     shadow_like = sat >= .85 * s_elem
     diff = lum(f3) - lum(surface.astype(np.float32))
     strong = cand & ~shadow_like & (np.abs(diff) > 25)                                 # a cover is darker OR lighter than what lies below (dark hair, a light strand on a dark ground)
+    thin = strong & ~(cv2.morphologyEx(strong.astype(np.uint8), cv2.MORPH_OPEN, np.ones((3, 3), np.uint8)) > 0)      # a cover over an element is a thin line (strand, outline); a blob of pale skin next to the hole is not - area is no cover
+    if thin.sum() >= 4:
+        strong = thin
     if strong.sum() < 4:
         return np.zeros_like(picked)
     sgn = 1.0 if float(np.median(diff[strong])) > 0 else -1.0
@@ -1270,10 +1282,27 @@ def swap_occluders(rgb, picked, level=95):
     on_element = picked & (al > .3 + (100 - level) / 250.0) & (re_ < SWAP_RE_MAX)
     occ |= on_element
     n, lab, st, _ = cv2.connectedComponentsWithStats(occ.astype(np.uint8), connectivity=8)
+    hull = cv2.dilate(closed.astype(np.uint8), np.ones((5, 5), np.uint8)) > 0
     keep = np.zeros_like(occ)
     for i in range(1, n):
         if st[i, cv2.CC_STAT_AREA] >= 3:
-            keep |= lab == i
+            comp = lab == i
+            if (comp & picked).any() or (comp & hull).any():
+                # a strand across the element comes in on one side and goes out on the other: the proof is that its outside part has TWO ends.
+                # Thin dark bits that touch the element from one side only (the dark edge of its own shade, a hair mass next to it) are no cover.
+                n_out, _ = cv2.connectedComponents((comp & ~hull).astype(np.uint8), connectivity=8)
+                if n_out - 1 < 2:
+                    continue
+                yo_, xo_ = np.nonzero(comp & ~hull)                # ... and what lies inside the element continues the line of its two outside ends (an invented stub lies beside it)
+                yi, xi = np.nonzero(comp & hull)
+                if yi.size >= 3 and yo_.size >= 6:
+                    vx, vy, x0_, y0_ = cv2.fitLine(np.stack([xo_, yo_], 1).astype(np.float32), cv2.DIST_L2, 0, .01, .01).ravel()
+                    off = np.abs((xi - x0_) * vy - (yi - y0_) * vx)
+                    if float(np.median(off)) > 3.5:
+                        continue
+                if yi.size and float(np.hypot(yi.max() - yi.min() + 1, xi.max() - xi.min() + 1)) < .70 * size:    # and crosses it (nearly) over its full length; measured: real strands 0.71-1.17, an invented stub 0.67 (thin margin - to be re-checked on real pictures)
+                    continue
+            keep |= comp
     return keep
 
 
@@ -1327,6 +1356,7 @@ def swap_remove(rgb, picked, region0, base):
     sat_ = (f_.max(2) - f_.min(2)) / np.maximum(f_.max(2), 1.0)
     objlike = sat_ >= .6 * float(np.median(sat_[picked]))                                   # saturated like the element = its own darker part (shade), never a structure worth keeping
     keep = region0 & ~rim & ~objlike & (np.abs(rgb.astype(np.float32) - swap_heal(rgb, picked)).max(2) > 30)                                       # ring pixels that are NOT element rim (e.g. lit hair edge): healed around, then put back as they were
+    hard = swap_style(rgb) == "drawing"
     best = None
     for level in (None, 99, 95, 85, 70, 50):
         occ = swap_occluders(rgb, picked, level)
@@ -1341,7 +1371,7 @@ def swap_remove(rgb, picked, region0, base):
         grown = lambda m, k: cv2.dilate(m.astype(np.uint8), np.ones((k, k), np.uint8)) > 0
         base_hole = region | grown(occ, 5) | (cov > 0)
         # hair next to the hole is no source for the skin below it: it is kept out of the sources (wide), but only the part right at the hole is rewritten
-        out = swap_heal(rgb, base_hole | (dark & grown(region, 15)), apply=region | (grown(occ, 5) & ~dark) | (cov > 0))
+        out = swap_heal(rgb, base_hole | (dark & grown(region, 15)), apply=region | (grown(occ, 5) & ~dark) | (cov > 0), hard=hard)
         strand, soft = swap_strand_pixels(rgb, out, occ & ~(cov > 0), picked)
         out = out * (1 - soft[:, :, None]) + strand * soft[:, :, None]
         if cov_h is not None:                                  # the cover over the element, translucent as before, now over the surface
@@ -1353,7 +1383,7 @@ def swap_remove(rgb, picked, region0, base):
     return best
 
 
-def swap_strand_line(occ, on, shape, ss=8):
+def swap_strand_line(occ, on, shape, ss=8, span=None):
     """A strand that crosses the element is a smooth thin line. Where it lay over the element the pixel estimate is ragged (stair steps, gaps),
     so the line is REBUILT: its centre path is fitted through the strand pixels (the part outside the element guides the part over it),
     its width follows the measured width, and it is drawn `ss` times finer and averaged down - clean edge, solid core, tapering end.
@@ -1372,9 +1402,11 @@ def swap_strand_line(occ, on, shape, ss=8):
     if swap_axes:
         m = m.T
         on_t = on.T
+        span_t = None if span is None else span.T
         hh, ww = w, h
     else:
         on_t = on
+        span_t = span
         hh, ww = h, w
     yo, xo = np.nonzero(on_t)
     ya, yb = yo.min(), yo.max()
@@ -1411,6 +1443,11 @@ def swap_strand_line(occ, on, shape, ss=8):
     wm = np.convolve(np.pad(wd[ok], 1, mode="edge"), np.ones(3) / 3, mode="valid")
     wm = np.clip(wm, 1.0, 6.0)
     r0, r1 = max(ya - 1, rows[0]), min(yb + 1, rows[-1])
+    if span_t is not None:                                     # the line runs across the WHOLE element, also where the pixel estimate found only part of it
+        near_el = cv2.dilate(span_t.astype(np.uint8), np.ones((5, 5), np.uint8)) > 0
+        inside = [r for r in range(hh) if 0 <= int(round(np.polyval(pc, r + .5))) < ww and near_el[r, int(round(np.polyval(pc, r + .5)))]]
+        if inside:
+            r0, r1 = max(min(r0, inside[0] - 1), rows[0]), min(max(r1, inside[-1] + 1), rows[-1])
     ry = np.arange(r0, r1 + 1) + .5
     xc = np.polyval(pc, ry)
     ww_ = np.interp(ry, r_ok, wm)
@@ -1426,6 +1463,41 @@ def swap_strand_line(occ, on, shape, ss=8):
     full = np.zeros((hh, ww), np.float32)
     full[y0:y1, x0:x1] = cov
     return full.T.copy() if swap_axes else full
+
+
+def swap_verdict(rgb, out, picked, base, occ=None, removed=True):
+    """An honest one-line judgement of a removal/replacement, measured on the result itself (not on the algorithm's own score):
+    leftover element colour, a line that was in the picture and is gone, a patch of colour that does not belong to the surroundings
+    (a smear). Returns (word, [reasons]) with word 'ok' or 'uncertain' - the tool says when it is not sure instead of staying silent."""
+    f = rgb.astype(np.float32)
+    o = out.astype(np.float32)
+    zone = cv2.dilate(picked.astype(np.uint8), np.ones((5, 5), np.uint8)) > 0
+    ring = (cv2.dilate(picked.astype(np.uint8), np.ones((15, 15), np.uint8)) > 0) & ~zone
+    if not zone.any() or ring.sum() < 8:
+        return "uncertain", ["too little surrounding picture to judge"]
+    lum = lambda im: im[..., 0] * .299 + im[..., 1] * .587 + im[..., 2] * .114
+    reasons = []
+    resid = float(((np.abs(o - base[None, None, :]).max(2) < 45) & zone).sum()) / max(zone.sum(), 1)
+    if removed and resid > .02:
+        reasons.append("%.0f%% of the area still has the old element's colour" % (resid * 100))
+    lf_, lo_ = lum(f), lum(o)
+    amb = float(np.median(lf_[ring]))
+    kern = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (5, 5))
+    mask_l = zone & (np.abs(lf_ - amb) > .25 * max(amb, 40.0)) & ~((np.abs(f - base[None, None, :]).max(2) < 45))     # element colour is not a line
+    if mask_l.sum() >= 4:
+        hat = lambda im: np.maximum(cv2.morphologyEx(im.astype(np.float32), cv2.MORPH_BLACKHAT, kern), cv2.morphologyEx(im.astype(np.float32), cv2.MORPH_TOPHAT, kern))
+        li, lo = float(hat(lf_)[mask_l].sum()), float(hat(lo_)[mask_l].sum())
+        lost = max(0.0, li - lo) / max(li, 1.0)
+        if lost > .5:
+            reasons.append("a thin line (hair, outline) that crossed the element is %.0f%% weaker or gone" % (lost * 100))
+    lab = cv2.cvtColor(np.clip(o, 0, 255).astype(np.uint8), cv2.COLOR_RGB2LAB).astype(np.float32)
+    lab_in = cv2.cvtColor(np.ascontiguousarray(rgb), cv2.COLOR_RGB2LAB).astype(np.float32)
+    keep = zone & ~(occ if occ is not None else np.zeros_like(zone))
+    med = np.median(lab_in[ring], axis=0)
+    de = np.linalg.norm(lab[keep] - med[None, :], axis=1) if keep.any() else np.zeros(1)
+    if removed and float(np.percentile(de, 90)) > 14:
+        reasons.append("a patch of colour that does not match its surroundings (smear)")
+    return ("uncertain" if reasons else "ok"), reasons
 
 
 def swap_strand_pixels(rgb, healed, occ, picked):
@@ -1480,7 +1552,7 @@ def swap_strand_pixels(rgb, healed, occ, picked):
         hi = np.clip((hi - .45) / (1.0 / ss * .9) + .5, 0, 1)
         fine = cv2.resize(hi, (x1 - x0, y1 - y0), interpolation=cv2.INTER_AREA)
         soft[y0:y1, x0:x1] = np.where(on[y0:y1, x0:x1], fine, part)
-        line = swap_strand_line(occ, on, soft.shape)
+        line = swap_strand_line(occ, on, soft.shape, span=picked)
         if line is not None:
             zone = picked | on                                 # the rebuilt line also covers pixels of the element the pixel estimate had missed
             soft[zone] = line[zone]
@@ -1770,6 +1842,8 @@ def cmd_swap(a):
         print("photon check: " + photon)
     print("wrote %s (picked %d px at %s, tolerance %d%s)" % (a.output, int(picked.sum()), a.at, t, note))
     print("check: %d of %d pixels changed%s, the rest (%.2f%%) is identical to the original" % (int(changed.sum()), h * w, area, 100 * (1 - changed.mean())))
+    word, why = swap_verdict(rgb, np.clip(out, 0, 255).round().astype(np.uint8), picked, base_col, occ, removed=(a.shape == "none"))
+    print("verdict: " + ("ok" if word == "ok" else "uncertain - " + "; ".join(why) + (" (area%s)" % area.replace(" in a", ":"))))
 
 
 # ----------------------------------------------------------------------------- regions (the harness: lets an AI pick elements without pixel guessing)

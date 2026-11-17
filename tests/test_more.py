@@ -2336,3 +2336,10 @@ def test_swap_keeps_a_light_strand_over_a_dark_ground_and_removes_only_the_eleme
     assert (out[30:42, 40:52, 2] - out[30:42, 40:52, 0]).max() < 40                              # the blue is gone (no pixel is bluer than red)
     inside = [y for y in range(30, 42) if out[y, 30 + (y - 10) // 2: 32 + (y - 10) // 2].min() > 190]
     assert len(inside) >= 10                                                                   # the light strand is still there over the old element
+
+
+def test_swap_says_in_one_line_whether_it_is_sure(tmp_path):
+    _swap_picture(tmp_path)
+    said = subprocess.run([sys.executable, str(Path(__file__).resolve().parent.parent / "pixelcut.py"), "swap", str(tmp_path / "s.png"), str(tmp_path / "o.png"), "--at", "45,35"],
+                          capture_output=True, text=True, check=True).stdout.strip().splitlines()
+    assert said[-1].startswith("verdict: ok")                                                 # a plain red square on skin is a clean case, and the verdict is the last line, where a person looks
