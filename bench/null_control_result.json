@@ -1,0 +1,851 @@
+[
+ {
+  "foto": "astronaut",
+  "form": "heart",
+  "nichts_tun": {
+   "dE": 88.91,
+   "residual": 1.0,
+   "pass": false,
+   "failed": [
+    "residual",
+    "dE_hole_mean",
+    "strand_iou"
+   ]
+  },
+  "wahrheit": {
+   "dE": 0.0,
+   "residual": 0.0,
+   "pass": true,
+   "failed": []
+  },
+  "wahrheit_neue_textur": {
+   "dE": 2.97,
+   "residual": 0.0,
+   "pass": false,
+   "failed": [
+    "outside_changed"
+   ]
+  },
+  "cv2_inpaint": {
+   "dE": 4.75,
+   "residual": 0.0426,
+   "pass": false,
+   "failed": [
+    "residual",
+    "strand_iou",
+    "edge_px"
+   ]
+  }
+ },
+ {
+  "foto": "astronaut",
+  "form": "circle",
+  "nichts_tun": {
+   "dE": 87.63,
+   "residual": 1.0,
+   "pass": false,
+   "failed": [
+    "residual",
+    "dE_hole_mean",
+    "strand_iou"
+   ]
+  },
+  "wahrheit": {
+   "dE": 0.0,
+   "residual": 0.0,
+   "pass": true,
+   "failed": []
+  },
+  "wahrheit_neue_textur": {
+   "dE": 3.25,
+   "residual": 0.0,
+   "pass": false,
+   "failed": [
+    "outside_changed"
+   ]
+  },
+  "cv2_inpaint": {
+   "dE": 7.51,
+   "residual": 0.2368,
+   "pass": false,
+   "failed": [
+    "residual",
+    "dE_hole_mean",
+    "strand_iou",
+    "edge_px"
+   ]
+  }
+ },
+ {
+  "foto": "brick",
+  "form": "heart",
+  "nichts_tun": {
+   "dE": 69.07,
+   "residual": 1.0,
+   "pass": false,
+   "failed": [
+    "residual",
+    "dE_hole_mean",
+    "strand_iou"
+   ]
+  },
+  "wahrheit": {
+   "dE": 0.0,
+   "residual": 0.0,
+   "pass": true,
+   "failed": []
+  },
+  "wahrheit_neue_textur": {
+   "dE": 2.97,
+   "residual": 0.0,
+   "pass": false,
+   "failed": [
+    "outside_changed"
+   ]
+  },
+  "cv2_inpaint": {
+   "dE": 6.33,
+   "residual": 0.2139,
+   "pass": false,
+   "failed": [
+    "residual",
+    "dE_hole_mean",
+    "strand_iou",
+    "edge_px"
+   ]
+  }
+ },
+ {
+  "foto": "brick",
+  "form": "circle",
+  "nichts_tun": {
+   "dE": 69.98,
+   "residual": 1.0,
+   "pass": false,
+   "failed": [
+    "residual",
+    "dE_hole_mean",
+    "strand_iou"
+   ]
+  },
+  "wahrheit": {
+   "dE": 0.0,
+   "residual": 0.0,
+   "pass": true,
+   "failed": []
+  },
+  "wahrheit_neue_textur": {
+   "dE": 2.85,
+   "residual": 0.0,
+   "pass": false,
+   "failed": [
+    "outside_changed"
+   ]
+  },
+  "cv2_inpaint": {
+   "dE": 5.87,
+   "residual": 0.1875,
+   "pass": false,
+   "failed": [
+    "residual",
+    "strand_iou",
+    "edge_px"
+   ]
+  }
+ },
+ {
+  "foto": "cat",
+  "form": "heart",
+  "nichts_tun": {
+   "dE": 80.49,
+   "residual": 1.0,
+   "pass": false,
+   "failed": [
+    "residual",
+    "dE_hole_mean",
+    "strand_iou"
+   ]
+  },
+  "wahrheit": {
+   "dE": 0.0,
+   "residual": 0.0,
+   "pass": true,
+   "failed": []
+  },
+  "wahrheit_neue_textur": {
+   "dE": 2.67,
+   "residual": 0.0,
+   "pass": false,
+   "failed": [
+    "outside_changed"
+   ]
+  },
+  "cv2_inpaint": {
+   "dE": 12.97,
+   "residual": 0.3933,
+   "pass": false,
+   "failed": [
+    "residual",
+    "dE_hole_mean",
+    "strand_iou",
+    "edge_px"
+   ]
+  }
+ },
+ {
+  "foto": "cat",
+  "form": "circle",
+  "nichts_tun": {
+   "dE": 81.66,
+   "residual": 1.0,
+   "pass": false,
+   "failed": [
+    "residual",
+    "dE_hole_mean",
+    "strand_iou",
+    "edge_px"
+   ]
+  },
+  "wahrheit": {
+   "dE": 0.0,
+   "residual": 0.0,
+   "pass": true,
+   "failed": []
+  },
+  "wahrheit_neue_textur": {
+   "dE": 2.84,
+   "residual": 0.0,
+   "pass": false,
+   "failed": [
+    "outside_changed"
+   ]
+  },
+  "cv2_inpaint": {
+   "dE": 12.21,
+   "residual": 0.3575,
+   "pass": false,
+   "failed": [
+    "residual",
+    "dE_hole_mean",
+    "strand_iou",
+    "edge_px"
+   ]
+  }
+ },
+ {
+  "foto": "chelsea",
+  "form": "heart",
+  "nichts_tun": {
+   "dE": 73.95,
+   "residual": 1.0,
+   "pass": false,
+   "failed": [
+    "residual",
+    "dE_hole_mean",
+    "strand_iou"
+   ]
+  },
+  "wahrheit": {
+   "dE": 0.0,
+   "residual": 0.0,
+   "pass": true,
+   "failed": []
+  },
+  "wahrheit_neue_textur": {
+   "dE": 2.76,
+   "residual": 0.0,
+   "pass": false,
+   "failed": [
+    "outside_changed"
+   ]
+  },
+  "cv2_inpaint": {
+   "dE": 5.6,
+   "residual": 0.0343,
+   "pass": false,
+   "failed": [
+    "residual",
+    "strand_iou",
+    "edge_px"
+   ]
+  }
+ },
+ {
+  "foto": "chelsea",
+  "form": "circle",
+  "nichts_tun": {
+   "dE": 74.08,
+   "residual": 1.0,
+   "pass": false,
+   "failed": [
+    "residual",
+    "dE_hole_mean",
+    "strand_iou"
+   ]
+  },
+  "wahrheit": {
+   "dE": 0.0,
+   "residual": 0.0,
+   "pass": true,
+   "failed": []
+  },
+  "wahrheit_neue_textur": {
+   "dE": 2.92,
+   "residual": 0.0,
+   "pass": false,
+   "failed": [
+    "outside_changed"
+   ]
+  },
+  "cv2_inpaint": {
+   "dE": 7.84,
+   "residual": 0.2281,
+   "pass": false,
+   "failed": [
+    "residual",
+    "dE_hole_mean",
+    "strand_iou",
+    "edge_px"
+   ]
+  }
+ },
+ {
+  "foto": "china.jpg",
+  "form": "heart",
+  "nichts_tun": {
+   "dE": 78.6,
+   "residual": 1.0,
+   "pass": false,
+   "failed": [
+    "residual",
+    "dE_hole_mean",
+    "strand_iou"
+   ]
+  },
+  "wahrheit": {
+   "dE": 0.0,
+   "residual": 0.0,
+   "pass": true,
+   "failed": []
+  },
+  "wahrheit_neue_textur": {
+   "dE": 2.22,
+   "residual": 0.0,
+   "pass": false,
+   "failed": [
+    "outside_changed"
+   ]
+  },
+  "cv2_inpaint": {
+   "dE": 1.95,
+   "residual": 0.0398,
+   "pass": false,
+   "failed": [
+    "residual",
+    "strand_iou",
+    "edge_px"
+   ]
+  }
+ },
+ {
+  "foto": "china.jpg",
+  "form": "circle",
+  "nichts_tun": {
+   "dE": 79.2,
+   "residual": 1.0,
+   "pass": false,
+   "failed": [
+    "residual",
+    "dE_hole_mean",
+    "strand_iou"
+   ]
+  },
+  "wahrheit": {
+   "dE": 0.0,
+   "residual": 0.0,
+   "pass": true,
+   "failed": []
+  },
+  "wahrheit_neue_textur": {
+   "dE": 2.17,
+   "residual": 0.0,
+   "pass": false,
+   "failed": [
+    "outside_changed"
+   ]
+  },
+  "cv2_inpaint": {
+   "dE": 1.89,
+   "residual": 0.0152,
+   "pass": false,
+   "failed": [
+    "residual",
+    "strand_iou",
+    "edge_px"
+   ]
+  }
+ },
+ {
+  "foto": "coffee",
+  "form": "heart",
+  "nichts_tun": {
+   "dE": 83.74,
+   "residual": 1.0,
+   "pass": false,
+   "failed": [
+    "residual",
+    "dE_hole_mean",
+    "strand_iou"
+   ]
+  },
+  "wahrheit": {
+   "dE": 0.0,
+   "residual": 0.0,
+   "pass": true,
+   "failed": []
+  },
+  "wahrheit_neue_textur": {
+   "dE": 2.59,
+   "residual": 0.0,
+   "pass": false,
+   "failed": [
+    "outside_changed"
+   ]
+  },
+  "cv2_inpaint": {
+   "dE": 5.38,
+   "residual": 0.0716,
+   "pass": false,
+   "failed": [
+    "residual",
+    "strand_iou",
+    "edge_px"
+   ]
+  }
+ },
+ {
+  "foto": "coffee",
+  "form": "circle",
+  "nichts_tun": {
+   "dE": 84.39,
+   "residual": 1.0,
+   "pass": false,
+   "failed": [
+    "residual",
+    "dE_hole_mean",
+    "strand_iou"
+   ]
+  },
+  "wahrheit": {
+   "dE": 0.0,
+   "residual": 0.0,
+   "pass": true,
+   "failed": []
+  },
+  "wahrheit_neue_textur": {
+   "dE": 2.58,
+   "residual": 0.0,
+   "pass": false,
+   "failed": [
+    "outside_changed"
+   ]
+  },
+  "cv2_inpaint": {
+   "dE": 6.88,
+   "residual": 0.2267,
+   "pass": false,
+   "failed": [
+    "residual",
+    "dE_hole_mean",
+    "strand_iou",
+    "edge_px"
+   ]
+  }
+ },
+ {
+  "foto": "flower.jpg",
+  "form": "heart",
+  "nichts_tun": {
+   "dE": 66.89,
+   "residual": 1.0,
+   "pass": false,
+   "failed": [
+    "residual",
+    "dE_hole_mean",
+    "strand_iou",
+    "edge_px"
+   ]
+  },
+  "wahrheit": {
+   "dE": 0.0,
+   "residual": 0.0,
+   "pass": true,
+   "failed": []
+  },
+  "wahrheit_neue_textur": {
+   "dE": 3.04,
+   "residual": 0.0,
+   "pass": false,
+   "failed": [
+    "outside_changed"
+   ]
+  },
+  "cv2_inpaint": {
+   "dE": 5.77,
+   "residual": 0.1045,
+   "pass": false,
+   "failed": [
+    "residual",
+    "strand_iou",
+    "edge_px"
+   ]
+  }
+ },
+ {
+  "foto": "flower.jpg",
+  "form": "circle",
+  "nichts_tun": {
+   "dE": 67.03,
+   "residual": 1.0,
+   "pass": false,
+   "failed": [
+    "residual",
+    "dE_hole_mean",
+    "strand_iou",
+    "edge_px"
+   ]
+  },
+  "wahrheit": {
+   "dE": 0.0,
+   "residual": 0.0,
+   "pass": true,
+   "failed": []
+  },
+  "wahrheit_neue_textur": {
+   "dE": 2.95,
+   "residual": 0.0,
+   "pass": false,
+   "failed": [
+    "outside_changed"
+   ]
+  },
+  "cv2_inpaint": {
+   "dE": 5.3,
+   "residual": 0.0937,
+   "pass": false,
+   "failed": [
+    "residual",
+    "strand_iou",
+    "edge_px"
+   ]
+  }
+ },
+ {
+  "foto": "grass",
+  "form": "heart",
+  "nichts_tun": {
+   "dE": 72.83,
+   "residual": 1.0,
+   "pass": false,
+   "failed": [
+    "residual",
+    "dE_hole_mean",
+    "strand_iou",
+    "edge_px"
+   ]
+  },
+  "wahrheit": {
+   "dE": 0.0,
+   "residual": 0.0,
+   "pass": true,
+   "failed": []
+  },
+  "wahrheit_neue_textur": {
+   "dE": 3.14,
+   "residual": 0.0,
+   "pass": false,
+   "failed": [
+    "outside_changed"
+   ]
+  },
+  "cv2_inpaint": {
+   "dE": 9.36,
+   "residual": 0.2857,
+   "pass": false,
+   "failed": [
+    "residual",
+    "dE_hole_mean",
+    "strand_iou",
+    "edge_px"
+   ]
+  }
+ },
+ {
+  "foto": "grass",
+  "form": "circle",
+  "nichts_tun": {
+   "dE": 72.27,
+   "residual": 1.0,
+   "pass": false,
+   "failed": [
+    "residual",
+    "dE_hole_mean",
+    "strand_iou",
+    "edge_px"
+   ]
+  },
+  "wahrheit": {
+   "dE": 0.0,
+   "residual": 0.0,
+   "pass": true,
+   "failed": []
+  },
+  "wahrheit_neue_textur": {
+   "dE": 3.18,
+   "residual": 0.0,
+   "pass": false,
+   "failed": [
+    "outside_changed"
+   ]
+  },
+  "cv2_inpaint": {
+   "dE": 7.07,
+   "residual": 0.2065,
+   "pass": false,
+   "failed": [
+    "residual",
+    "dE_hole_mean",
+    "strand_iou",
+    "edge_px"
+   ]
+  }
+ },
+ {
+  "foto": "gravel",
+  "form": "heart",
+  "nichts_tun": {
+   "dE": 71.6,
+   "residual": 1.0,
+   "pass": false,
+   "failed": [
+    "residual",
+    "dE_hole_mean",
+    "strand_iou",
+    "edge_px"
+   ]
+  },
+  "wahrheit": {
+   "dE": 0.0,
+   "residual": 0.0,
+   "pass": true,
+   "failed": []
+  },
+  "wahrheit_neue_textur": {
+   "dE": 2.77,
+   "residual": 0.0,
+   "pass": false,
+   "failed": [
+    "outside_changed"
+   ]
+  },
+  "cv2_inpaint": {
+   "dE": 12.88,
+   "residual": 0.5213,
+   "pass": false,
+   "failed": [
+    "residual",
+    "dE_hole_mean",
+    "strand_iou",
+    "edge_px"
+   ]
+  }
+ },
+ {
+  "foto": "gravel",
+  "form": "circle",
+  "nichts_tun": {
+   "dE": 71.44,
+   "residual": 1.0,
+   "pass": false,
+   "failed": [
+    "residual",
+    "dE_hole_mean",
+    "strand_iou"
+   ]
+  },
+  "wahrheit": {
+   "dE": 0.0,
+   "residual": 0.0,
+   "pass": true,
+   "failed": []
+  },
+  "wahrheit_neue_textur": {
+   "dE": 2.73,
+   "residual": 0.0,
+   "pass": false,
+   "failed": [
+    "outside_changed"
+   ]
+  },
+  "cv2_inpaint": {
+   "dE": 12.73,
+   "residual": 0.4774,
+   "pass": false,
+   "failed": [
+    "residual",
+    "dE_hole_mean",
+    "strand_iou",
+    "edge_px"
+   ]
+  }
+ },
+ {
+  "foto": "retina",
+  "form": "heart",
+  "nichts_tun": {
+   "dE": 77.36,
+   "residual": 1.0,
+   "pass": false,
+   "failed": [
+    "residual",
+    "dE_hole_mean",
+    "strand_iou"
+   ]
+  },
+  "wahrheit": {
+   "dE": 0.0,
+   "residual": 0.0,
+   "pass": true,
+   "failed": []
+  },
+  "wahrheit_neue_textur": {
+   "dE": 1.09,
+   "residual": 0.0,
+   "pass": false,
+   "failed": [
+    "outside_changed"
+   ]
+  },
+  "cv2_inpaint": {
+   "dE": 0.88,
+   "residual": 0.0,
+   "pass": false,
+   "failed": [
+    "strand_iou",
+    "edge_px"
+   ]
+  }
+ },
+ {
+  "foto": "retina",
+  "form": "circle",
+  "nichts_tun": {
+   "dE": 78.13,
+   "residual": 1.0,
+   "pass": false,
+   "failed": [
+    "residual",
+    "dE_hole_mean",
+    "strand_iou"
+   ]
+  },
+  "wahrheit": {
+   "dE": 0.0,
+   "residual": 0.0,
+   "pass": true,
+   "failed": []
+  },
+  "wahrheit_neue_textur": {
+   "dE": 1.08,
+   "residual": 0.0,
+   "pass": false,
+   "failed": [
+    "outside_changed"
+   ]
+  },
+  "cv2_inpaint": {
+   "dE": 0.85,
+   "residual": 0.0,
+   "pass": false,
+   "failed": [
+    "strand_iou",
+    "edge_px"
+   ]
+  }
+ },
+ {
+  "foto": "rocket",
+  "form": "heart",
+  "nichts_tun": {
+   "dE": 73.31,
+   "residual": 1.0,
+   "pass": false,
+   "failed": [
+    "residual",
+    "dE_hole_mean",
+    "strand_iou"
+   ]
+  },
+  "wahrheit": {
+   "dE": 0.0,
+   "residual": 0.0,
+   "pass": true,
+   "failed": []
+  },
+  "wahrheit_neue_textur": {
+   "dE": 2.92,
+   "residual": 0.0,
+   "pass": false,
+   "failed": [
+    "outside_changed",
+    "edge_px"
+   ]
+  },
+  "cv2_inpaint": {
+   "dE": 1.36,
+   "residual": 0.0,
+   "pass": false,
+   "failed": [
+    "strand_iou",
+    "edge_px"
+   ]
+  }
+ },
+ {
+  "foto": "rocket",
+  "form": "circle",
+  "nichts_tun": {
+   "dE": 73.28,
+   "residual": 1.0,
+   "pass": false,
+   "failed": [
+    "residual",
+    "dE_hole_mean",
+    "strand_iou"
+   ]
+  },
+  "wahrheit": {
+   "dE": 0.0,
+   "residual": 0.0,
+   "pass": true,
+   "failed": []
+  },
+  "wahrheit_neue_textur": {
+   "dE": 2.93,
+   "residual": 0.0,
+   "pass": false,
+   "failed": [
+    "outside_changed"
+   ]
+  },
+  "cv2_inpaint": {
+   "dE": 1.38,
+   "residual": 0.0,
+   "pass": false,
+   "failed": [
+    "strand_iou",
+    "edge_px"
+   ]
+  }
+ }
+]
