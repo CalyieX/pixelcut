@@ -33,7 +33,7 @@ import numpy as np
 from PIL import Image, ImageOps
 
 
-__version__ = "1.9.11"
+__version__ = "1.9.12"
 PART_NAME = re.compile(r"part_(0|[1-9]\d*)\.png")                  # exactly the names split writes: no leading zeros
 LOSSLESS = (".png", ".tif", ".tiff")
 
@@ -1713,6 +1713,17 @@ def cmd_swap(a):
     refuse_inputs([a.input], [a.output] + ([a.cut] if a.cut else []))
     rgb = load_rgb(a.input)
     h, w = rgb.shape[:2]
+    if a.region is not None:                                   # one sentence of intent: "take out element 3" - the point comes from the regions list, nobody counts pixels
+        try:
+            regs = json.loads((Path(a.regions_dir) / "regions.json").read_text(encoding="utf-8"))["regions"]
+        except (OSError, ValueError, KeyError):
+            sys.exit("error: no regions.json in %s - run `pixelcut regions <picture> <folder>` first" % a.regions_dir)
+        hit = [r for r in regs if r["id"] == a.region]
+        if not hit:
+            sys.exit("error: there is no element %d (the list has 1..%d)" % (a.region, len(regs)))
+        a.at = hit[0]["at"]
+    if a.at is None:
+        sys.exit("error: say which element: --at x,y or --region N")
     try:
         points = [tuple(int(v) for v in pt.split(",")) for pt in a.at.split(";")]
         if any(len(pt) != 2 for pt in points):
@@ -1733,9 +1744,9 @@ def cmd_swap(a):
     if a.tolerance is None:
         picked = swap_add_tinted(rgb, picked)
     if picked.sum() > .25 * h * w:
-        sys.exit("error: the picked colour covers more than a quarter of the picture - pick a point on a small element or lower --tolerance")
+        sys.exit("error: the picked colour covers more than a quarter of the picture - pick a point on a smaller element (or take it from `pixelcut regions`)")
     if picked.sum() < 4:
-        sys.exit("error: almost nothing was picked at --at %s - raise --tolerance or pick the middle of the element" % a.at)
+        sys.exit("error: almost nothing was picked at %s - pick the middle of the element (or take it from `pixelcut regions`)" % a.at)
     ys_p, xs_p = np.nonzero(picked)
     size_el = max(xs_p.max() - xs_p.min() + 1, ys_p.max() - ys_p.min() + 1)
     if SWAP_AUTO_SCALE and not getattr(a, "_inner", False) and size_el > 1.6 * SWAP_WORK_SIZE and not a.cut:
@@ -1858,6 +1869,8 @@ def cmd_swap(a):
     print("check: %d of %d pixels changed%s, the rest (%.2f%%) is identical to the original" % (int(changed.sum()), h * w, area, 100 * (1 - changed.mean())))
     word, why = swap_verdict(rgb, np.clip(out, 0, 255).round().astype(np.uint8), picked, base_col, occ, removed=(a.shape == "none"))
     print("verdict: " + ("ok" if word == "ok" else "uncertain - " + "; ".join(why) + (" (area%s)" % area.replace(" in a", ":"))))
+    if a.strict and word != "ok":
+        sys.exit(3)
 
 
 # ----------------------------------------------------------------------------- regions (the harness: lets an AI pick elements without pixel guessing)
@@ -2349,7 +2362,7 @@ def build_parser(parser_class=argparse.ArgumentParser):
 
     s = sub.add_parser("swap", help="take an element out (pick it with one point), heal the place, optionally set a new shape there with an automatic shadow")
     s.add_argument("input"); s.add_argument("output")
-    s.add_argument("--at", required=True, help="x,y: a point on the element (its colour is picked, the connected area is taken); several points x,y;x,y add areas, e.g. a darker part over hair")
+    s.add_argument("--at", default=None, help="x,y: a point on the element (its colour is picked, the connected area is taken); several points x,y;x,y add areas, e.g. a darker part over hair")
     s.add_argument("--tolerance", type=float, default=None, help="how far a colour may differ from the picked one and still belong to the element (default: automatic)")
     s.add_argument("--grow", type=int, default=3, help="px added around the element so its soft rim goes too")
     s.add_argument("--shape", default="none", help="none (just remove), diamond, square, circle, heart or star")
@@ -2359,6 +2372,9 @@ def build_parser(parser_class=argparse.ArgumentParser):
     s.add_argument("--flat", action="store_true", help="draw the new shape flat: no shading and no outline taken from the original")
     s.add_argument("--cut", help="also save the removed element (exact pixels) as a transparent png")
     s.add_argument("--flat-surface", action="store_true", help="do not bend the new shape to the surface (it is detected automatically)")
+    s.add_argument("--region", type=int, default=None, help="instead of --at: the number of an element from `pixelcut regions` (read from --regions-dir)")
+    s.add_argument("--regions-dir", default=".", help="folder with the regions.json written by `pixelcut regions` (default: here)")
+    s.add_argument("--strict", action="store_true", help="exit code 3 when the verdict is 'uncertain' (for scripts and agents)")
     s.set_defaults(fn=cmd_swap)
 
     s = sub.add_parser("regions", help="number the distinct elements of a picture (regions.png + regions.json) so an assistant can pick one by id")

@@ -1985,7 +1985,7 @@ def test_tools_prints_every_command_as_a_tool_definition(tmp_path):
     names = {t["name"] for t in json.loads(out)["tools"]}
     assert {"pixelcut_swap", "pixelcut_regions", "pixelcut_split", "pixelcut_join", "pixelcut_batch", "pixelcut_alpha"} <= names
     swap = next(t for t in json.loads(out)["tools"] if t["name"] == "pixelcut_swap")
-    assert "at" in swap["input_schema"]["required"] and swap["input_schema"]["properties"]["shadow"]["type"] == "number"
+    assert "at" in swap["input_schema"]["properties"] and "region" in swap["input_schema"]["properties"] and swap["input_schema"]["properties"]["shadow"]["type"] == "number"
 
 
 def test_swap_reports_how_much_of_the_picture_stayed_identical(tmp_path):
@@ -2343,3 +2343,19 @@ def test_swap_says_in_one_line_whether_it_is_sure(tmp_path):
     said = subprocess.run([sys.executable, str(Path(__file__).resolve().parent.parent / "pixelcut.py"), "swap", str(tmp_path / "s.png"), str(tmp_path / "o.png"), "--at", "45,35"],
                           capture_output=True, text=True, check=True).stdout.strip().splitlines()
     assert said[-1].startswith("verdict: ok")                                                 # a plain red square on skin is a clean case, and the verdict is the last line, where a person looks
+
+
+def test_swap_takes_an_element_by_its_region_number_and_strict_gives_an_exit_code(tmp_path):
+    _swap_picture(tmp_path)
+    exe = str(Path(__file__).resolve().parent.parent / "pixelcut.py")
+    run = lambda *args: subprocess.run([sys.executable, exe, *args], capture_output=True, text=True)
+    r = run("regions", str(tmp_path / "s.png"), str(tmp_path / "reg"))
+    assert r.returncode == 0
+    regs = json.loads((tmp_path / "reg" / "regions.json").read_text(encoding="utf-8"))["regions"]
+    red = [g for g in regs if g["box"][0] <= 45 <= g["box"][2] and g["box"][1] <= 35 <= g["box"][3] and g["area"] < 2000][0]       # the small element that holds the point 45,35
+    ok = run("swap", str(tmp_path / "s.png"), str(tmp_path / "o1.png"), "--region", str(red["id"]), "--regions-dir", str(tmp_path / "reg"), "--strict")
+    assert ok.returncode == 0 and ok.stdout.strip().splitlines()[-1].startswith("verdict: ok")        # by number, no coordinates, and a sure verdict exits 0
+    bad = run("swap", str(tmp_path / "s.png"), str(tmp_path / "o2.png"), "--region", "999", "--regions-dir", str(tmp_path / "reg"))
+    assert bad.returncode != 0 and "no element 999" in bad.stderr
+    none = run("swap", str(tmp_path / "s.png"), str(tmp_path / "o3.png"))
+    assert none.returncode != 0 and "--region" in none.stderr                                       # the error names both ways, it does not tell the person to tune a number
