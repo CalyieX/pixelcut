@@ -1,0 +1,47 @@
+Downloading file 'data/lily.tif' from 'https://gitlab.com/scikit-image/data/-/raw/2cdc5ce89b334d28f06a58c9f0ca21aa6992a5ba/lily-of-the-valley-fluorescence.tif' to 'C:\Users\borro\AppData\Local\scikit-image\scikit-image\Cache\0.26.0'.
+astronaut    heart  5000  FAIL  dE 4.5  verdict-ok False  
+astronaut    circle 5000  PASS  dE 4.5  verdict-ok False  
+astronaut    heart  5001  FAIL  dE 2.4  verdict-ok True  SILENT
+astronaut    circle 5001  PASS  dE 2.6  verdict-ok True  
+brick        heart  5100  FAIL  dE 6.9  verdict-ok False  
+brick        circle 5100  FAIL  dE 6.6  verdict-ok False  
+brick        heart  5101  FAIL  dE 5.3  verdict-ok False  
+brick        circle 5101  FAIL  dE 7.4  verdict-ok False  
+cat          heart  5200  FAIL  dE 16.5  verdict-ok False  
+cat          circle 5200  FAIL  dE 15.7  verdict-ok False  
+cat          heart  5201  FAIL  dE 9.4  verdict-ok False  
+cat          circle 5201  FAIL  dE 8.0  verdict-ok False  
+chelsea      heart  5300  FAIL  dE 5.3  verdict-ok False  
+chelsea      circle 5300  FAIL  dE 8.5  verdict-ok False  
+chelsea      heart  5301  FAIL  dE 31.6  verdict-ok False  
+chelsea      circle 5301  FAIL  dE 36.5  verdict-ok False  
+china.jpg    heart  5400  FAIL  dE 2.2  verdict-ok False  
+china.jpg    circle 5400  FAIL  dE 1.9  verdict-ok True  SILENT
+china.jpg    heart  5401  FAIL  dE 15.1  verdict-ok False  
+china.jpg    circle 5401  FAIL  dE 21.3  verdict-ok False  
+coffee       heart  5500  FAIL  dE 4.7  verdict-ok False  
+coffee       circle 5500  FAIL  dE 5.8  verdict-ok False  
+coffee       heart  5501  FAIL  dE 32.3  verdict-ok False  
+coffee       circle 5501  FAIL  dE 28.5  verdict-ok False  
+flower.jpg   heart  5600  FAIL  dE 4.4  verdict-ok False  
+flower.jpg   circle 5600  FAIL  dE 4.6  verdict-ok False  
+flower.jpg   heart  5601  PASS  dE 1.5  verdict-ok True  
+flower.jpg   circle 5601  PASS  dE 1.8  verdict-ok True  
+grass        heart  5700  FAIL  dE 6.7  verdict-ok False  
+grass        circle 5700  FAIL  dE 7.0  verdict-ok False  
+grass        heart  5701  FAIL  dE 6.6  verdict-ok False  
+grass        circle 5701  FAIL  dE 6.5  verdict-ok False  
+gravel       heart  5800  FAIL  dE 14.7  verdict-ok False  
+gravel       circle 5800  FAIL  dE 13.2  verdict-ok False  
+gravel       heart  5801  FAIL  dE 6.9  verdict-ok False  
+gravel       circle 5801  FAIL  dE 5.6  verdict-ok False  
+retina       heart  5900  PASS  dE 0.3  verdict-ok True  
+retina       circle 5900  PASS  dE 0.1  verdict-ok True  
+retina       heart  5901  FAIL  dE 2.3  verdict-ok True  SILENT
+retina       circle 5901  FAIL  dE 5.0  verdict-ok True  SILENT
+rocket       heart  6000  PASS  dE 1.2  verdict-ok False  
+rocket       circle 6000  FAIL  dE 1.9  verdict-ok False  
+rocket       heart  6001  FAIL  dE 1.6  verdict-ok True  SILENT
+rocket       circle 6001  FAIL  dE 2.8  verdict-ok True  SILENT
+
+44 Faelle: 7 innerhalb der Schwellen (0.08-0.29); ehrlich (kein verschwiegener Fehler): 38 (0.73-0.94); verschwiegen: 6
