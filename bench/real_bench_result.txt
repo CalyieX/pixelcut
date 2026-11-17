@@ -38,10 +38,10 @@ gravel       circle 5801  FAIL  dE 5.6  verdict-ok False
 retina       heart  5900  PASS  dE 0.3  verdict-ok True  
 retina       circle 5900  PASS  dE 0.1  verdict-ok True  
 retina       heart  5901  FAIL  dE 2.3  verdict-ok True  SILENT
-retina       circle 5901  FAIL  dE 5.0  verdict-ok True  SILENT
+retina       circle 5901  FAIL  dE 5.0  verdict-ok False  
 rocket       heart  6000  PASS  dE 1.2  verdict-ok False  
 rocket       circle 6000  FAIL  dE 1.9  verdict-ok False  
 rocket       heart  6001  FAIL  dE 1.6  verdict-ok True  SILENT
 rocket       circle 6001  FAIL  dE 2.8  verdict-ok True  SILENT
 
-44 Faelle: 7 innerhalb der Schwellen (0.08-0.29); ehrlich (kein verschwiegener Fehler): 38 (0.73-0.94); verschwiegen: 6
+44 Faelle: 7 innerhalb der Schwellen (0.08-0.29); ehrlich (kein verschwiegener Fehler): 39 (0.76-0.95); verschwiegen: 5

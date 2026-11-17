@@ -33,7 +33,7 @@ import numpy as np
 from PIL import Image, ImageOps
 
 
-__version__ = "1.9.10"
+__version__ = "1.9.11"
 PART_NAME = re.compile(r"part_(0|[1-9]\d*)\.png")                  # exactly the names split writes: no leading zeros
 LOSSLESS = (".png", ".tif", ".tiff")
 
@@ -1497,6 +1497,20 @@ def swap_verdict(rgb, out, picked, base, occ=None, removed=True):
     de = np.linalg.norm(lab[keep] - med[None, :], axis=1) if keep.any() else np.zeros(1)
     if removed and float(np.percentile(de, 90)) > 14:
         reasons.append("a patch of colour that does not match its surroundings (smear)")
+    if removed and occ is not None:                              # colour bleed: the cover (strand) inside the old element must look like the same strand outside it
+        ins, outs = occ & (picked | zone), occ & ~zone
+        if ins.sum() >= 4 and outs.sum() >= 4:
+            ref = np.median(o[outs], axis=0)
+            axis = base - ref
+            tt = ((o[ins] - ref[None, :]) @ axis) / max(float(axis @ axis), 1.0)         # how far each pixel has moved from the strand's own colour towards the old element's colour
+            far = float((tt > .3).mean())
+            if float(np.linalg.norm(axis)) > 60 and far > .25:
+                reasons.append("%.0f%% of the line inside the area has a different colour than outside it (old element's colour left on it)" % (far * 100))
+    if removed and keep.sum() >= 30:                              # texture: a fill that is much smoother (or rougher) than the picture around it is a patch, not a continuation
+        hp = lambda im: lum(im) - cv2.GaussianBlur(lum(im), (0, 0), 1.5)
+        s_ring, s_fill = float(hp(f)[ring].std()), float(hp(o)[keep].std())
+        if s_ring > 2.5 and (s_fill < .45 * s_ring or s_fill > 2.2 * s_ring):
+            reasons.append("the fill's texture (%s) does not match the surroundings" % ("smoother" if s_fill < s_ring else "rougher"))
     return ("uncertain" if reasons else "ok"), reasons
 
 
