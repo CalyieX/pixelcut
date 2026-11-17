@@ -33,7 +33,7 @@ import numpy as np
 from PIL import Image, ImageOps
 
 
-__version__ = "1.9.12"
+__version__ = "1.9.13"
 PART_NAME = re.compile(r"part_(0|[1-9]\d*)\.png")                  # exactly the names split writes: no leading zeros
 LOSSLESS = (".png", ".tif", ".tiff")
 
@@ -1380,6 +1380,9 @@ def swap_remove(rgb, picked, region0, base):
         sc = swap_score(rgb, out, region, occ, base)
         if best is None or sc < best[6] - 1e-4:
             best = (out, region, occ | (cov > 0), soft, strand, level, sc, cov, cov_h)
+            best_rest = dark & ~region & ~(cov > 0) & ~occ
+    if best is not None:                                       # a dark hair-edge pixel next to the hole keeps its colour: the soft write-back of the fill must not turn it into a grey blotch (done on the chosen result, so the choice between levels is not changed)
+        best = (np.where(best_rest[:, :, None], rgb.astype(np.float32), best[0]),) + best[1:]
     return best
 
 
@@ -1441,7 +1444,7 @@ def swap_strand_line(occ, on, shape, ss=8, span=None):
     if wd[ok].max() > 7:                                       # not a thin line (a blob or a thick hair lock): leave it to the pixel estimate
         return None
     wm = np.convolve(np.pad(wd[ok], 1, mode="edge"), np.ones(3) / 3, mode="valid")
-    wm = np.clip(wm, 1.0, 6.0)
+    wm = np.clip(wm, 1.55, 6.0)                                # a line is never thinner than ~1.5 px: drawn exactly at 1 px a diagonal is either mush or stair steps, at 1.5 px it keeps a solid core AND a smooth edge
     r0, r1 = max(ya - 1, rows[0]), min(yb + 1, rows[-1])
     if span_t is not None:                                     # the line runs across the WHOLE element, also where the pixel estimate found only part of it
         near_el = cv2.dilate(span_t.astype(np.uint8), np.ones((5, 5), np.uint8)) > 0
@@ -1460,6 +1463,17 @@ def swap_strand_line(occ, on, shape, ss=8, span=None):
     pts = np.round(poly - np.array([x0 * ss, y0 * ss])).astype(np.int32)
     cv2.fillPoly(canvas, [pts], 255)
     cov = cv2.resize(canvas, (x1 - x0, y1 - y0), interpolation=cv2.INTER_AREA).astype(np.float32) / 255
+    cov = cv2.GaussianBlur(cov, (0, 0), .3)                   # no stair steps: a 1 px line gets the same soft edge as the rest of the picture
+    cov = np.clip((cov - .03) / .85, 0, 1)                      # the core stays solid like the original strand's
+    if span_t is not None:                                     # a strand end that stops INSIDE the old element fades out over ~4 px instead of ending in a hard cut
+        inner = cv2.erode(span_t.astype(np.uint8), np.ones((3, 3), np.uint8)) > 0
+        for end, sgn in ((r0, 1), (r1, -1)):
+            ex = int(round(np.polyval(pc, end + .5)))
+            if 0 <= ex < ww and 0 <= int(end) < hh and inner[int(end), ex]:
+                for k in range(4):
+                    yy = int(end) + sgn * k - y0
+                    if 0 <= yy < cov.shape[0]:
+                        cov[yy] *= (k + 1) / 5.0
     full = np.zeros((hh, ww), np.float32)
     full[y0:y1, x0:x1] = cov
     return full.T.copy() if swap_axes else full
@@ -1850,7 +1864,7 @@ def cmd_swap(a):
         note = ", new %s (shading%s%s, shadow %.0f%%)" % (a.shape, " kept" if not a.flat else " off", " + outline" if meas["outline"] is not None and not a.flat else "", strength * 100)
         note += "; surface: " + ("flat" if surf is None or a.flat_surface else "curved (%s, tilt %.0f%%) - shape bent to follow it" % ("convex" if surf["bulge"] > .03 else "concave" if surf["bulge"] < -.03 else "tilted", surf["tilt"] * 100))
     if a.shape == "none":                                      # taken out: the shadow the cover threw on the element now falls on the surface below, as a subtle darkening of the surface
-        if cast_fit is not None:
+        if cast_fit is not None and style != "drawing":        # not in a drawing: a soft grey smudge on a flat drawn area is pixel mush, drawn shadows have clear edges or are not there
             ys_p, xs_p = np.nonzero(picked)
             sig = max(1.2, max(xs_p.max() - xs_p.min() + 1, ys_p.max() - ys_p.min() + 1) / 9.0)
             feather = cv2.GaussianBlur((picked & ~hair & ~occ).astype(np.float32), (0, 0), sig)     # the shadow fades out where the old element ended - no cut-out of its silhouette
